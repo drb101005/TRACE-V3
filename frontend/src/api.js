@@ -21,7 +21,15 @@ export async function api(path, options = {}) {
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
     const detail = payload.detail;
-    throw new Error(typeof detail === 'string' ? detail : `API request failed (${response.status})`);
+    if (typeof detail === 'string') throw new Error(detail);
+    if (Array.isArray(detail)) {
+      const messages = detail.map(issue => {
+        const field = Array.isArray(issue.loc) ? issue.loc.filter(part => part !== 'body').join('.') : '';
+        return [field, issue.msg].filter(Boolean).join(': ');
+      }).filter(Boolean);
+      if (messages.length) throw new Error(messages.join('; '));
+    }
+    throw new Error(`API request failed (${response.status})`);
   }
   if (response.status === 204) return null;
   const type = response.headers.get('content-type') || '';
