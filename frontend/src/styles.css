@@ -28,4 +28,7 @@
 .new-engagement-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;padding-top:2px}
 .new-engagement-actions .error{flex:1}
 .create-engagement-btn{justify-self:start;padding:8px 12px;font-size:10px;white-space:nowrap}
+.evidence-register-title,.evidence-register-actions{display:flex;align-items:center;gap:10px}
+.evidence-register-actions{margin-left:auto}
+@media(max-width:520px){.panel-head:has(.evidence-register-title){align-items:flex-start;flex-wrap:wrap}.evidence-register-title{flex:1}.evidence-register-actions{width:100%;margin:0}.evidence-register-actions .btn{flex:1}}
 @media(max-width:680px){.new-engagement-panel{padding:18px}.new-engagement-form{grid-template-columns:1fr}.new-engagement-form .wide,.new-engagement-actions{grid-column:1}.new-engagement-actions{align-items:stretch;flex-direction:column}.new-engagement-actions .btn{align-self:flex-start}}
