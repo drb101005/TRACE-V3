@@ -1,4 +1,4 @@
-"""Small additive, versioned schema migrations for the initial SQLite deployment."""
+"""Small additive, versioned schema migrations for SQLite and PostgreSQL."""
 import re
 import os
 from datetime import datetime, timezone
@@ -71,7 +71,7 @@ def migrate():
             if "token_version" not in user_columns:
                 conn.execute(text("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0"))
             if "last_login_at" not in user_columns:
-                conn.execute(text("ALTER TABLE users ADD COLUMN last_login_at DATETIME"))
+                conn.execute(text("ALTER TABLE users ADD COLUMN last_login_at TIMESTAMP WITH TIME ZONE"))
             conn.execute(text("INSERT INTO schema_migrations(version, applied_at) VALUES (2, :applied_at)"), {"applied_at": datetime.now(timezone.utc).isoformat()})
             applied.add(2)
 
@@ -88,7 +88,7 @@ def migrate():
                 "due_date": "DATE",
                 "response_note": "TEXT NOT NULL DEFAULT ''",
                 "artifact_public_id": "VARCHAR(40)",
-                "updated_at": "DATETIME",
+                "updated_at": "TIMESTAMP WITH TIME ZONE",
             }
             for column, declaration in additions.items():
                 if column not in request_columns:

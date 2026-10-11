@@ -1,4 +1,5 @@
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api/v1';
+const API_ORIGIN = API_BASE.startsWith('http') ? new URL(API_BASE).origin : '';
 
 export function saveSession(token, user) {
   sessionStorage.setItem('trace-access-token', token);
@@ -15,7 +16,7 @@ export async function api(path, options = {}) {
   const token = sessionStorage.getItem('trace-access-token');
   if (token) headers.set('Authorization', `Bearer ${token}`);
   if (options.body && !(options.body instanceof FormData)) headers.set('Content-Type', 'application/json');
-  const url = path === '/health' ? '/health' : `${API_BASE}${path}`;
+  const url = path === '/health' ? `${API_ORIGIN}/health` : `${API_BASE}${path}`;
   const response = await fetch(url, { ...options, headers });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));

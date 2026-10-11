@@ -12,9 +12,9 @@ cp .env.example .env             # edit the secret and initial administrator cre
 uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-The Vite development server proxies `/api` and `/health` to port 8000. Start the frontend in a second terminal with `npm install && npm run dev`. Open `http://127.0.0.1:5173`; interactive API documentation is at `http://127.0.0.1:8000/docs`.
+The Vite development server in `frontend/` proxies `/api` and `/health` to port 8000. Start the frontend in a second terminal with `cd frontend && npm install && npm run dev`. Open `http://127.0.0.1:5173`; interactive API documentation is at `http://127.0.0.1:8000/docs`.
 
-The default SQLite database and uploaded files live in `./data`. Set `DATABASE_URL` to use another SQLAlchemy database URL, `TRACE_DATA_DIR` to move local state, `TRACE_MAX_UPLOAD_BYTES` to adjust the upload cap, and `TRACE_CORS_ORIGINS` to set allowed browser origins. `TRACE_SECRET_KEY` must be a strong random secret outside local development. `TRACE_BOOTSTRAP_ADMIN_EMAIL` and `TRACE_BOOTSTRAP_ADMIN_PASSWORD` create the initial administrator and restore its password if an earlier migration removed its password hash.
+The default SQLite database and uploaded files live in `./data`. Set `DATABASE_URL` to use another SQLAlchemy database URL (including Supabase PostgreSQL via psycopg 3), `TRACE_DATA_DIR` to move local state, `TRACE_MAX_UPLOAD_BYTES` to adjust the upload cap, and `TRACE_CORS_ORIGINS` to set allowed browser origins. `TRACE_SECRET_KEY` must be a strong random secret outside local development. `TRACE_BOOTSTRAP_ADMIN_EMAIL` and `TRACE_BOOTSTRAP_ADMIN_PASSWORD` create the initial administrator and restore its password if an earlier migration removed its password hash. For Vercel/Render/Supabase setup and storage requirements, see [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Workflow implemented
 
@@ -28,7 +28,7 @@ The default SQLite database and uploaded files live in `./data`. Set `DATABASE_U
 
 ## Schema changes and tests
 
-Startup applies versioned SQLite migrations from `backend/migrations.py`. Existing workflow rows are preserved; legacy clients receive isolated company records and their engagements remain linked to their original client. Migration 7 restores the password-hash column, clears the retired Google identity column, and reactivates accounts. Accounts whose password hashes were removed need a new temporary password from the administrator. Back up `data/trace.db` before deployment as a standard recovery measure. Tests configure their own database under the operating system temporary directory and do not use `data/trace.db`.
+Startup applies versioned SQLite/PostgreSQL schema migrations from `backend/migrations.py`. Existing workflow rows are preserved; legacy clients receive isolated company records and their engagements remain linked to their original client. Migration 7 restores the password-hash column, clears the retired Google identity column, and reactivates accounts. Accounts whose password hashes were removed need a new temporary password from the administrator. Back up the database before deployment as a standard recovery measure. Tests configure their own database under the operating system temporary directory and do not use the local database.
 
 ```bash
 .venv/bin/pytest -q

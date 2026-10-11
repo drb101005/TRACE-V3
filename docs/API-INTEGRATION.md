@@ -1,6 +1,6 @@
 # Frontend/API integration
 
-The React workspace uses `src/api.js` for bearer-token requests. In development, Vite proxies `/api` and `/health` to `http://127.0.0.1:8000`.
+The React workspace in `frontend/` uses `frontend/src/api.js` for bearer-token requests. In development, Vite proxies `/api` and `/health` to `http://127.0.0.1:8000`. In deployment, `VITE_API_BASE_URL` points the browser to the FastAPI service.
 
 All account, company, engagement, artifact, procedure, sampling, finding, report, and audit-event records shown in the authenticated workspace are loaded from FastAPI endpoints backed by the database. The frontend contains no seeded users, engagements, findings, transactions, files, activity entries, dashboard metrics, or report contents. Empty database results render as empty states.
 

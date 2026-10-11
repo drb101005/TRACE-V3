@@ -1,0 +1,13 @@
+TRACE frontend and browser-check file manifest
+
+.env.example
+FILES-MANIFEST.txt
+e2e/
+index.html
+package.json
+package-lock.json
+playwright.config.js
+public/
+src/
+vercel.json
+vite.config.js

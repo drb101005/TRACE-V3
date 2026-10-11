@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: trace-api
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    disk:
+      name: trace-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: TRACE_SECRET_KEY
+        generateValue: true
+      - key: TRACE_DATA_DIR
+        value: /var/data
+      - key: TRACE_CORS_ORIGINS
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: TRACE_BOOTSTRAP_ADMIN_EMAIL
+        sync: false
+      - key: TRACE_BOOTSTRAP_ADMIN_PASSWORD
+        sync: false
