@@ -1,0 +1,23 @@
+{
+  "servers": {
+    "trace-backend": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": ["-m", "mcp_server.server"],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "TRACE_API_BASE_URL": "http://127.0.0.1:8000/api/v1",
+        "TRACE_BACKEND_URL": "http://127.0.0.1:8000",
+        "TRACE_ACCESS_TOKEN": "${input:trace-access-token}"
+      }
+    }
+  },
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "trace-access-token",
+      "description": "TRACE API bearer token for the account and grants MCP tools should use",
+      "password": true
+    }
+  ]
+}

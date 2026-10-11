@@ -2,15 +2,16 @@
 
 Run with: uvicorn backend.main:app --reload --port 8000
 """
-import csv, hashlib, io, json, os, secrets
+import base64, csv, hashlib, hmac, io, json, os, secrets, time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import urlencode
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from jose import JWTError, jwt
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from sqlalchemy import func, select
@@ -30,7 +31,10 @@ Base.metadata.create_all(bind=engine)
 migrate()
 SECRET_KEY = os.getenv("TRACE_SECRET_KEY", "local-development-secret-change-before-deployment")
 ALGORITHM = "HS256"
-TOKEN_MINUTES = int(os.getenv("TRACE_TOKEN_MINUTES", "720"))
+TOKEN_MINUTES = int(os.getenv("TRACE_TOKEN_MINUTES", "1440"))
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://127.0.0.1:8000/api/v1/auth/google/callback").strip()
 UPLOAD_DIR = DATA_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 MAX_UPLOAD_BYTES = int(os.getenv("TRACE_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
@@ -107,6 +111,41 @@ class RegisterIn(BaseModel):
 class LoginIn(BaseModel):
     email: EmailStr
     password: str
+
+
+def _google_state_pack(state: str, nonce: str, frontend_origin: str) -> str:
+    payload = json.dumps({"state": state, "nonce": nonce, "frontend_origin": frontend_origin, "issued_at": int(time.time())}, separators=(",", ":")).encode()
+    encoded = base64.urlsafe_b64encode(payload).decode().rstrip("=")
+    signature = hmac.new(SECRET_KEY.encode(), encoded.encode(), hashlib.sha256).hexdigest()
+    return f"{encoded}.{signature}"
+
+
+def _google_state_unpack(value: str, expected_state: str) -> dict[str, Any] | None:
+    try:
+        encoded, signature = value.split(".", 1)
+        expected_signature = hmac.new(SECRET_KEY.encode(), encoded.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected_signature):
+            return None
+        payload = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+        if payload.get("state") != expected_state or time.time() - payload.get("issued_at", 0) > 600:
+            return None
+        return payload
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _google_popup_response(frontend_origin: str, *, result: dict[str, Any] | None = None, error: str | None = None, status_code: int = 200) -> HTMLResponse:
+    message = {"type": "trace-google-auth", "result": result, "error": error}
+    serialized = json.dumps(message, separators=(",", ":")).replace("<", "\\u003c")
+    html = f"""<!doctype html><meta charset="utf-8"><title>TRACE Google sign-in</title>
+<p id="status">Returning to TRACE…</p><script>
+const message = {serialized};
+if (window.opener) {{ window.opener.postMessage(message, {json.dumps(frontend_origin)}); window.close(); }}
+else {{ document.getElementById('status').textContent = message.error || 'Sign-in complete. You may close this window.'; }}
+</script>"""
+    response = HTMLResponse(html, status_code=status_code, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"})
+    response.delete_cookie("trace_google_oauth_state", path="/api/v1/auth/google")
+    return response
 
 class CompanyIn(BaseModel):
     legal_name: str = Field(min_length=2, max_length=240)
@@ -264,6 +303,75 @@ def login(body: LoginIn, request: Request, db: DbDep):
     user.last_login_at = now()
     db.add(SecurityEvent(actor_id=user.id, email=email, event_type="auth.login_succeeded", source_ip=source_ip)); db.commit()
     return issue_token(user)
+
+
+@app.get("/api/v1/auth/google/start", tags=["auth"])
+def google_login_start(request: Request, frontend_origin: str = Query(..., min_length=8, max_length=300)):
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        raise HTTPException(503, "Google sign-in is not configured on the backend")
+    if frontend_origin not in origins:
+        raise HTTPException(400, "Frontend origin is not allowed")
+    state, nonce = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+        "nonce": nonce,
+        "prompt": "select_account",
+    }
+    response = RedirectResponse(f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}", status_code=302)
+    response.set_cookie("trace_google_oauth_state", _google_state_pack(state, nonce, frontend_origin), max_age=600, httponly=True, secure=request.url.scheme == "https", samesite="lax", path="/api/v1/auth/google")
+    return response
+
+
+@app.get("/api/v1/auth/google/callback", tags=["auth"], response_class=HTMLResponse)
+async def google_login_callback(request: Request, db: DbDep, state: str = "", code: str | None = None, error: str | None = None):
+    packed_state = request.cookies.get("trace_google_oauth_state", "")
+    oauth_state = _google_state_unpack(packed_state, state)
+    if not oauth_state or oauth_state.get("frontend_origin") not in origins:
+        raise HTTPException(400, "Google sign-in state is invalid or expired. Start sign-in again.")
+    frontend_origin = oauth_state["frontend_origin"]
+    if error:
+        return _google_popup_response(frontend_origin, error="Google sign-in was cancelled or denied.")
+    if not code:
+        return _google_popup_response(frontend_origin, error="Google did not return an authorization code.")
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        return _google_popup_response(frontend_origin, error="Google sign-in is not configured on the backend.", status_code=503)
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            token_response = await client.post("https://oauth2.googleapis.com/token", data={"code": code, "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET, "redirect_uri": GOOGLE_REDIRECT_URI, "grant_type": "authorization_code"})
+        token_response.raise_for_status()
+        google_tokens = token_response.json()
+        raw_id_token = google_tokens.get("id_token")
+        if not raw_id_token:
+            raise ValueError("Google did not return an identity token")
+        from google.auth.transport.requests import Request as GoogleRequest
+        from google.oauth2 import id_token as google_id_token
+        claims = google_id_token.verify_oauth2_token(raw_id_token, GoogleRequest(), GOOGLE_CLIENT_ID)
+    except Exception:
+        return _google_popup_response(frontend_origin, error="Google could not verify this sign-in. Try again.")
+    if not hmac.compare_digest(str(claims.get("nonce", "")), str(oauth_state["nonce"])):
+        return _google_popup_response(frontend_origin, error="Google sign-in verification failed. Start sign-in again.")
+    email = str(claims.get("email", "")).strip().lower()
+    if claims.get("email_verified") not in (True, "true") or not email or not claims.get("sub"):
+        return _google_popup_response(frontend_origin, error="Google must provide a verified email address.")
+    user = db.scalar(select(User).where(User.google_subject == str(claims["sub"])))
+    if user is None:
+        user = db.scalar(select(User).where(User.email == email))
+        if user is None:
+            return _google_popup_response(frontend_origin, error="No TRACE account uses this verified email. Create a TRACE account with this email first, then sign in with Google.")
+        if user.google_subject and user.google_subject != str(claims["sub"]):
+            return _google_popup_response(frontend_origin, error="This TRACE account is already linked to another Google account.")
+        user.google_subject = str(claims["sub"])
+    if not user.active:
+        return _google_popup_response(frontend_origin, error="This TRACE account is disabled.")
+    source_ip = request.client.host if request.client else ""
+    user.last_login_at = now()
+    db.add(SecurityEvent(actor_id=user.id, email=user.email, event_type="auth.google_login_succeeded", source_ip=source_ip))
+    db.commit()
+    return _google_popup_response(frontend_origin, result=issue_token(user))
 
 @app.get("/api/v1/auth/me", tags=["auth"])
 def me(user: UserDep): return user_out(user)

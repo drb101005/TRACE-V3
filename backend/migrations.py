@@ -7,7 +7,7 @@ from sqlalchemy import inspect, select, text
 from .database import engine
 from .models import Company
 
-MIGRATION_VERSION = 4
+MIGRATION_VERSION = 5
 
 def _normalized_company(name: str, fallback: str) -> tuple[str, str]:
     display = " ".join((name or "").split()).strip() or fallback
@@ -93,3 +93,11 @@ def migrate():
                 if column not in request_columns:
                     conn.execute(text(f"ALTER TABLE evidence_requests ADD COLUMN {column} {declaration}"))
             conn.execute(text("INSERT INTO schema_migrations(version, applied_at) VALUES (4, :applied_at)"), {"applied_at": datetime.now(timezone.utc).isoformat()})
+            applied.add(4)
+
+        if 5 not in applied:
+            user_columns = {column["name"] for column in inspect(conn).get_columns("users")}
+            if "google_subject" not in user_columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN google_subject VARCHAR(255)"))
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_google_subject ON users (google_subject)"))
+            conn.execute(text("INSERT INTO schema_migrations(version, applied_at) VALUES (5, :applied_at)"), {"applied_at": datetime.now(timezone.utc).isoformat()})
