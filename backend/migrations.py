@@ -1,4 +1,4 @@
-"""Small additive, versioned schema migrations for the initial SQLite deployment."""
+"""Small versioned schema migrations for the SQLite deployment."""
 import re
 from datetime import datetime, timezone
 
@@ -7,7 +7,7 @@ from sqlalchemy import inspect, select, text
 from .database import engine
 from .models import Company
 
-MIGRATION_VERSION = 5
+MIGRATION_VERSION = 6
 
 def _normalized_company(name: str, fallback: str) -> tuple[str, str]:
     display = " ".join((name or "").split()).strip() or fallback
@@ -15,7 +15,7 @@ def _normalized_company(name: str, fallback: str) -> tuple[str, str]:
     return display, normalized
 
 def migrate():
-    """Apply only additive changes and preserve existing user/engagement rows."""
+    """Apply versioned schema and access-policy changes while preserving workflow rows."""
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at VARCHAR(40) NOT NULL)"))
         applied = {row[0] for row in conn.execute(text("SELECT version FROM schema_migrations"))}
@@ -101,3 +101,16 @@ def migrate():
                 conn.execute(text("ALTER TABLE users ADD COLUMN google_subject VARCHAR(255)"))
             conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_google_subject ON users (google_subject)"))
             conn.execute(text("INSERT INTO schema_migrations(version, applied_at) VALUES (5, :applied_at)"), {"applied_at": datetime.now(timezone.utc).isoformat()})
+            applied.add(5)
+
+        if 6 not in applied:
+            user_columns = {column["name"] for column in inspect(conn).get_columns("users")}
+            if "password_hash" in user_columns:
+                conn.execute(text("ALTER TABLE users DROP COLUMN password_hash"))
+            # There is no password-login throttling table once Google is the sole auth provider.
+            conn.execute(text("DROP TABLE IF EXISTS login_attempts"))
+            # Require explicit admin approval for pre-existing accounts and revoke their old sessions.
+            conn.execute(text("UPDATE users SET active=CASE WHEN lower(email)='drb.genai@gmail.com' THEN active ELSE 0 END, token_version=token_version+1"))
+            # Only the designated Google identity may hold platform administrator privileges.
+            conn.execute(text("UPDATE users SET role='auditor' WHERE role='admin' AND lower(email) <> 'drb.genai@gmail.com'"))
+            conn.execute(text("INSERT INTO schema_migrations(version, applied_at) VALUES (6, :applied_at)"), {"applied_at": datetime.now(timezone.utc).isoformat()})

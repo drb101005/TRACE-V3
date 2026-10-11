@@ -11,7 +11,7 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# Set TRACE_SECRET_KEY and the initial administrator credentials in .env.
+# Set TRACE_SECRET_KEY and Google OAuth credentials in .env. The administrator signs in as drb.genai@gmail.com.
 uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 ```
 

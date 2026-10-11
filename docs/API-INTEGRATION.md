@@ -6,7 +6,7 @@ All account, company, engagement, artifact, procedure, sampling, finding, report
 
 Connected routes include:
 
-- `POST /api/v1/auth/register`, `POST /api/v1/auth/login`, and `GET /api/v1/auth/me` for identity and session validation.
+- Google OAuth popup routes (`GET /api/v1/auth/google/start` and `/callback`) provide sign-in; `GET /api/v1/auth/me` validates the session. Admins provision client/auditor Gmail addresses with `POST /api/v1/admin/users`.
 - `GET/POST /api/v1/engagements/` for engagement lists and client creation.
 - `/api/v1/uploads/{engagement_id}/...` for evidence upload, list, validation, and download.
 - `/api/v1/audit/checks/catalog` and engagement audit routes for checks, findings, sampling, reports, snapshots, scans, and event integrity.
