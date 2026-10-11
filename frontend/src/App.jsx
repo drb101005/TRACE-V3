@@ -3,6 +3,7 @@ import { Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-r
 import { api, clearSession, jsonBody, saveSession } from './api';
 import { Activity, ArrowRight, Building2, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, ClipboardCheck, Download, FileArchive, FileCheck2, FileText, Fingerprint, Gauge, GitBranch, History, Home, Layers3, ListChecks, LockKeyhole, LogOut, Menu, PanelLeftClose, Plus, RefreshCw, Search, ScanSearch, Shield, ShieldCheck, SlidersHorizontal, Upload, User, Users, X } from 'lucide-react';
 import * as d3 from 'd3';
+import JSZip from 'jszip';
 
 const roles = { client: 'Client', auditor: 'Independent auditor', admin: 'Platform administrator' };
 const nav = {
@@ -68,7 +69,7 @@ function Auth({ mode }) {
 }
 
 function EngagementSelect({ engagements, value, onChange }) { return <label>Engagement<select value={value} onChange={e => onChange(e.target.value)}><option value="">Select an engagement</option>{engagements.map(e => <option key={e.id} value={e.id}>{e.name} · {e.id}</option>)}</select></label>; }
-function EngagementTable({ engagements }) { return <Table headers={['Engagement', 'Organization', 'Period', 'Scope', 'Status', 'Updated']} rows={engagements.map(e => [<><strong>{e.name}</strong><small>{e.id}</small></>, e.organization, e.period, e.scope, e.status, e.updated_at ? new Date(e.updated_at).toLocaleString() : '—'])}/>; }
+function EngagementTable({ engagements, onAssign }) { return <Table headers={['Engagement', 'Organization', 'Period', 'Scope', 'Status', 'Updated', ...(onAssign ? ['Auditor access'] : [])]} rows={engagements.map(e => [<><strong>{e.name}</strong><small>{e.id}</small></>, e.organization, e.period, e.scope, e.status, e.updated_at ? new Date(e.updated_at).toLocaleString() : '—', ...(onAssign ? [<button className="textlink" onClick={() => onAssign(e)}>{e.auditor_id ? 'Manage access' : 'Assign auditor'}</button>] : [])])}/>; }
 
 function NewAudit({ onCreated }) {
   const [form, setForm] = useState({ name: '', organization: '', period: '', scope: '', required_records: '' }), [error, setError] = useState(''), [busy, setBusy] = useState(false);
@@ -78,10 +79,62 @@ function NewAudit({ onCreated }) {
 }
 
 function Assignment({ engagement, onDone }) {
-  const { data: auditors, error } = useApiData('/auditors'); const [auditor, setAuditor] = useState(''), [fields, setFields] = useState(['documents', 'transactions', 'checks', 'findings', 'events', 'report', 'sampling']), [message, setMessage] = useState('');
-  const allowed = ['organization', 'period', 'scope', 'required_records', 'documents', 'transactions', 'findings', 'events', 'report', 'checks', 'sampling'];
-  async function assign() { setMessage(''); try { await api(`/engagements/${encodeURIComponent(engagement.id)}/assign`, { method: 'POST', body: jsonBody({ auditor_id: Number(auditor), allowed_fields: fields }) }); setMessage('Auditor assignment saved.'); onDone?.(); } catch (e) { setMessage(e.message); } }
-  return <section className="panel pad"><h2>Auditor access</h2><ErrorBox error={error}/><label>Auditor<select value={auditor} onChange={e => setAuditor(e.target.value)}><option value="">Select an auditor</option>{(auditors || []).map(a => <option key={a.id} value={a.id}>{a.name} · {a.organization || a.email}</option>)}</select></label><div className="checks">{allowed.map(field => <label key={field}><input type="checkbox" checked={fields.includes(field)} onChange={e => setFields(f => e.target.checked ? [...f, field] : f.filter(x => x !== field))}/>{field.replaceAll('_', ' ')}</label>)}</div>{message && <p>{message}</p>}<Btn disabled={!auditor} onClick={assign}>Save access grants</Btn></section>;
+  const [auditors, setAuditors] = useState([]), [files, setFiles] = useState([]), [error, setError] = useState(''), [loading, setLoading] = useState(true), [busy, setBusy] = useState(false);
+  const [auditor, setAuditor] = useState(engagement.auditor_id ? String(engagement.auditor_id) : ''), [fields, setFields] = useState(['documents', 'transactions', 'checks', 'findings', 'events', 'report', 'sampling']), [allowedArtifactIds, setAllowedArtifactIds] = useState([]), [message, setMessage] = useState('');
+  const allowed = ['organization', 'period', 'scope', 'required_records', 'documents', 'transactions', 'findings', 'events', 'report', 'checks', 'sampling', 'compliance'];
+  useEffect(() => {
+    let active = true;
+    setLoading(true); setError('');
+    Promise.all([
+      api('/auditors'),
+      api(`/uploads/${encodeURIComponent(engagement.id)}/uploads`),
+      api(`/engagements/${encodeURIComponent(engagement.id)}/access`),
+    ]).then(([auditorRows, fileRows, access]) => {
+      if (!active) return;
+      setAuditors(auditorRows); setFiles(fileRows); setAuditor(access.auditor_id ? String(access.auditor_id) : '');
+      if (access.auditor_id) setFields(access.allowed_fields);
+      setAllowedArtifactIds(access.allowed_artifact_ids || []);
+    }).catch(e => { if (active) setError(e.message); }).finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [engagement.id]);
+  function toggleFile(id, checked) { setAllowedArtifactIds(ids => checked ? [...new Set([...ids, id])] : ids.filter(item => item !== id)); }
+  async function assign() {
+    setMessage(''); setError(''); setBusy(true);
+    const body = { auditor_id: Number(auditor), allowed_fields: fields, allowed_artifact_ids: fields.includes('documents') ? allowedArtifactIds : [] };
+    const existingAuditor = engagement.auditor_id && Number(auditor) === engagement.auditor_id;
+    try {
+      await api(`/engagements/${encodeURIComponent(engagement.id)}${existingAuditor ? '/access' : '/assign'}`, { method: existingAuditor ? 'PUT' : 'POST', body: jsonBody(existingAuditor ? { allowed_fields: body.allowed_fields, allowed_artifact_ids: body.allowed_artifact_ids } : body) });
+      setMessage('Auditor and file access saved.'); onDone?.();
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  }
+  const documentsAllowed = fields.includes('documents');
+  return <section className="panel pad"><div className="review-row"><h2>Auditor access</h2><button className="textlink" onClick={onDone}>Close</button></div><p>Choose the auditor’s workspace permissions and the specific uploaded files they can open.</p><ErrorBox error={error}/>{loading ? <p>Loading current access and uploaded files…</p> : <>
+    <label>Auditor<select value={auditor} onChange={e => setAuditor(e.target.value)}><option value="">Select an auditor</option>{auditors.map(a => <option key={a.id} value={a.id}>{a.name} · {a.organization || a.email}</option>)}</select></label>
+    <h3>Workspace permissions</h3><div className="checks">{allowed.map(field => <label key={field}><input type="checkbox" checked={fields.includes(field)} onChange={e => setFields(f => e.target.checked ? [...f, field] : f.filter(x => x !== field))}/>{field.replaceAll('_', ' ')}</label>)}</div>
+    <div className="review-row"><h3>Files available to this auditor</h3><span>{documentsAllowed ? `${allowedArtifactIds.length} of ${files.length} selected` : 'Enable documents permission first'}</span></div>
+    {!files.length ? <Empty>Upload files in Documents & records before selecting file access.</Empty> : <div className="assignment-files">{files.map(file => <label key={file.id}><input type="checkbox" disabled={!documentsAllowed} checked={documentsAllowed && allowedArtifactIds.includes(file.id)} onChange={e => toggleFile(file.id, e.target.checked)}/><span><strong>{file.filename}</strong><small>{new Date(file.created_at).toLocaleString()} · {(file.size / 1024).toFixed(1)} KB</small></span></label>)}</div>}
+    <div className="actions"><Btn kind="soft" onClick={onDone}>Cancel</Btn><Btn disabled={!auditor || busy || loading || Boolean(error)} onClick={assign}>{busy ? 'Saving…' : engagement.auditor_id ? 'Save access' : 'Assign auditor'}</Btn></div>
+  </>}{message && <p>{message}</p>}</section>;
+}
+
+function EngagementProgress({ engagementId }) {
+  const path = engagementId ? `/engagements/${encodeURIComponent(engagementId)}/progress` : null;
+  const { data, error, loading, reload } = useApiData(path, [engagementId]);
+  return <section className="panel pad stage-panel">
+    <div className="review-row stage-heading"><div><h2>Engagement progress</h2><p>Completed and remaining steps, based on saved engagement records.</p></div><Btn kind="soft" disabled={loading || !engagementId} onClick={reload}><RefreshCw size={14}/> Refresh</Btn></div>
+    <ErrorBox error={error}/>
+    {loading ? <p>Loading progress…</p> : data && <>
+      <div className="stage-summary"><strong>{data.percent_complete}%</strong><span>{data.completed_steps} of {data.total_steps} steps complete</span></div>
+      <div className="stage-progress" role="progressbar" aria-label="Engagement progress" aria-valuenow={data.percent_complete} aria-valuemin="0" aria-valuemax="100"><span style={{ width: `${data.percent_complete}%` }}/></div>
+      <ol className="stage-list">{data.steps.map((step, index) => <li className={step.status === 'complete' ? 'complete' : 'pending'} key={step.key}>
+        <span className="stage-marker" aria-label={step.status}>{step.status === 'complete' ? <Check size={14}/> : index + 1}</span>
+        <div><strong>{step.title}</strong><small>{step.detail}</small></div>
+        <Pill>{step.status === 'complete' ? 'Complete' : 'Remaining'}</Pill>
+      </li>)}</ol>
+      <p className="stage-note">This checklist reflects saved milestones. Formal engagement closure is not currently recorded by TRACE.</p>
+    </>}
+  </section>;
 }
 
 function Documents({ engagements, engagementId, setEngagementId }) {
@@ -124,9 +177,36 @@ function Reports({ engagements, engagementId, setEngagementId }) {
   useEffect(() => { setReport(null); reloadVersions(); }, [reloadVersions]);
   async function generate() { setBusy(true); setError(''); try { setReport(await api(`/audit/${encodeURIComponent(engagementId)}/report`)); await reloadVersions(); } catch (e) { setError(e.message); } finally { setBusy(false); } }
   async function scan() { setBusy(true); setError(''); try { const result = await api(`/audit/${encodeURIComponent(engagementId)}/scan`, { method: 'POST' }); setReport(result); await reloadVersions(); } catch (e) { setError(e.message); } finally { setBusy(false); } }
-  function download() { const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' })); const a = document.createElement('a'); a.href = url; a.download = `${engagementId}-report.json`; a.click(); URL.revokeObjectURL(url); }
+  async function downloadCompleteReport() {
+    setBusy(true); setError('');
+    try {
+      // The API enforces the caller's transaction-export grant before returning the CSV.
+      const csvResponse = await api(`/audit/${encodeURIComponent(engagementId)}/exports/csv`);
+      const csv = await csvResponse.text();
+      const zip = new JSZip();
+      const charts = Array.from(document.querySelectorAll('.report-chart-grid .revenue-chart')).map((section, index) => {
+        const svg = section.querySelector('svg')?.cloneNode(true);
+        if (!svg) return null;
+        svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+        const title = section.querySelector('h2')?.textContent || `Chart ${index + 1}`;
+        const filename = `chart-${String(index + 1).padStart(2, '0')}.svg`;
+        zip.file(`charts/${filename}`, new XMLSerializer().serializeToString(svg));
+        return { title, svg: svg.outerHTML };
+      }).filter(Boolean);
+      const reportHtml = createDownloadableReport(report, charts);
+      const safeId = String(engagementId).replace(/[^a-zA-Z0-9_-]/g, '_');
+      zip.file(`${safeId}-report.html`, reportHtml);
+      zip.file(`${safeId}-workpaper.csv`, csv);
+      zip.file(`${safeId}-report.json`, JSON.stringify(report, null, 2));
+      const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+      const url = URL.createObjectURL(blob), anchor = document.createElement('a');
+      anchor.href = url; anchor.download = `${safeId}-complete-report.zip`; anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  }
   const analysis = report?.revenue_analysis;
-  return <div className="stack"><Header eyebrow="Reports" title="Reports & continuous scanning" desc="Generate a pandas report from the selected engagement’s uploaded datasets."/><div className="filters"><EngagementSelect engagements={engagements} value={engagementId} onChange={setEngagementId}/></div><ErrorBox error={error}/>{engagementId && <div className="actions"><Btn disabled={busy} onClick={generate}>{busy ? 'Analyzing uploaded data…' : 'Generate report'}</Btn><Btn kind="soft" disabled={busy} onClick={scan}>Scan latest dataset versions</Btn>{report && <Btn kind="soft" onClick={download}><Download size={15}/> Download JSON</Btn>}</div>}{analysis && <>
+  return <div className="stack"><Header eyebrow="Reports" title="Reports & continuous scanning" desc="Generate a pandas report from the selected engagement’s uploaded datasets."/><div className="filters"><EngagementSelect engagements={engagements} value={engagementId} onChange={setEngagementId}/></div><ErrorBox error={error}/>{engagementId && <div className="actions"><Btn disabled={busy} onClick={generate}>{busy ? 'Analyzing uploaded data…' : 'Generate report'}</Btn><Btn kind="soft" disabled={busy} onClick={scan}>Scan latest dataset versions</Btn>{report && <Btn kind="soft" disabled={busy} onClick={downloadCompleteReport}><Download size={15}/> {busy ? 'Preparing download…' : 'Download complete report (.zip)'}</Btn>}</div>}{analysis && <>
     <section className="stats report-stats">{[['Invoices', analysis.summary.invoice_count], ['Flagged', analysis.summary.flagged_invoice_count], ['Gross amount', analysis.summary.currency_count > 1 ? 'Multiple currencies' : formatAmount(analysis.summary.gross_total)], ['Check findings', analysis.discrepancy_count], ['Data files', analysis.datasets.length]].map(([label, value]) => <article className="stat" key={label}><small>{label}</small><strong>{value}</strong><em>From uploaded records</em></article>)}</section>
     {analysis.summary.currency_count > 1 && <section className="panel pad"><h2>Totals by currency</h2><Table headers={['Currency', 'Gross invoice amount', 'Taxable value', 'Tax and TCS']} rows={Object.keys(analysis.summary.gross_totals_by_currency).map(currency => [currency, formatAmount(analysis.summary.gross_totals_by_currency[currency]), formatAmount(analysis.summary.taxable_totals_by_currency[currency]), formatAmount(analysis.summary.tax_totals_by_currency[currency])])}/></section>}
     <section className="panel"><div className="panel-head"><h2>Source Audit_Flag values</h2><Pill>{analysis.source_audit_flags.flagged_count} flagged</Pill></div><p className="flag-note">Flag status is taken only from the uploaded Audit_Flag column. No other fields or checks change this status.</p>{analysis.source_audit_flags.flagged_records.length ? <Table headers={['Invoice ID', 'Bill no.', 'Audit_Flag', 'Issue type', 'Issue detail']} rows={analysis.source_audit_flags.flagged_records.map(x => [x.invoice_id, x.bill_no, x.audit_flag, x.audit_issue_type, x.audit_issue_detail])}/> : <Empty>No invoice rows have Audit_Flag marked as Flag.</Empty>}<p className="flag-note">Not flag: {analysis.source_audit_flags.not_flagged_count} · Unclassified/blank: {analysis.source_audit_flags.unclassified_count}</p></section>
@@ -135,6 +215,29 @@ function Reports({ engagements, engagementId, setEngagementId }) {
     <section className="panel"><div className="panel-head"><h2>Analyzed uploads</h2><Pill>{analysis.datasets.length} files</Pill></div>{analysis.datasets.length ? <Table headers={['File', 'Recognized dataset', 'Rows', 'Columns']} rows={analysis.datasets.map(x => [x.filename, x.recognized_as, x.rows, x.columns])}/> : <Empty>No supported tabular uploads are stored for this engagement.</Empty>}</section>
     <section className="panel pad"><h2>Analysis notes</h2><p>Method: {analysis.method} · version {analysis.analysis_version}. All findings require human review.</p><ul className="analysis-notes">{analysis.limitations.map(note => <li key={note}>{note}</li>)}</ul></section>
     </>}{report && <details className="panel pad"><summary>Full generated report data</summary><pre>{JSON.stringify(report, null, 2)}</pre></details>}<section className="panel"><div className="panel-head"><h2>Stored report versions</h2><Pill>{versions.length} versions</Pill></div>{versions.length ? <Table headers={['Version', 'Snapshot', 'SHA-256', 'Created']} rows={versions.map(v => [v.version, v.snapshot_id ?? '—', <code>{v.report_hash}</code>, new Date(v.created_at).toLocaleString()])}/> : <Empty>No report versions are stored for this engagement.</Empty>}</section></div>;
+}
+
+function escapeReportHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
+}
+
+function createDownloadableReport(report, charts) {
+  const analysis = report?.revenue_analysis;
+  const summary = analysis?.summary;
+  const summaryRows = summary ? [
+    ['Invoices', summary.invoice_count],
+    ['Flagged invoices', summary.flagged_invoice_count],
+    ['Discrepancy rows', analysis.discrepancy_count],
+    ['Analyzed files', analysis.datasets?.length ?? 0],
+    ['Currency count', summary.currency_count],
+  ].map(([label, value]) => `<tr><th>${escapeReportHtml(label)}</th><td>${escapeReportHtml(value)}</td></tr>`).join('') : '<tr><td colspan="2">This report contains a scan result rather than revenue analysis.</td></tr>';
+  const chartMarkup = charts.length ? charts.map(chart => `<section><h2>${escapeReportHtml(chart.title)}</h2>${chart.svg}</section>`).join('') : '<p>No chart SVGs were available for this report.</p>';
+  const discrepancyMarkup = (analysis?.discrepancies || []).filter(issue => Number(issue.count) > 0).map(issue => `<tr><td>${escapeReportHtml(issue.label)}</td><td>${escapeReportHtml(issue.code)}</td><td>${escapeReportHtml(issue.count)}</td><td>${escapeReportHtml(issue.amount ?? '—')}</td></tr>`).join('') || '<tr><td colspan="4">No discrepancy rows were found.</td></tr>';
+  const datasetMarkup = (analysis?.datasets || []).map(dataset => `<tr><td>${escapeReportHtml(dataset.filename)}</td><td>${escapeReportHtml(dataset.recognized_as)}</td><td>${escapeReportHtml(dataset.rows)}</td><td>${escapeReportHtml((dataset.columns || []).join(', '))}</td></tr>`).join('') || '<tr><td colspan="4">No supported tabular uploads were analyzed.</td></tr>';
+  const findingMarkup = (report?.findings || []).map(finding => `<tr><td>${escapeReportHtml(finding.title)}</td><td>${escapeReportHtml(finding.severity)}</td><td>${escapeReportHtml(finding.status)}</td><td>${escapeReportHtml(finding.description)}</td></tr>`).join('') || '<tr><td colspan="4">No findings are included.</td></tr>';
+  const procedureMarkup = (report?.procedure_runs || []).map(run => `<li>Run ${escapeReportHtml(run.id)} · ${escapeReportHtml(run.created_at || '')} · ${escapeReportHtml(run.procedure || run.check_name || 'Procedure')}</li>`).join('') || '<li>No procedure runs are included.</li>';
+  const rawData = escapeReportHtml(JSON.stringify(report, null, 2));
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TRACE Complete Report</title><style>body{font:15px/1.55 Arial,sans-serif;color:#24352b;max-width:1050px;margin:36px auto;padding:0 24px}h1,h2{color:#173e31}header{border-bottom:2px solid #dce5dc;padding-bottom:18px;margin-bottom:28px}.meta{color:#627168}table{border-collapse:collapse;width:100%;margin:12px 0 30px}th,td{text-align:left;border:1px solid #dce5dc;padding:9px;vertical-align:top}th{background:#f2f5f0}section.chart{break-inside:avoid;border:1px solid #dce5dc;border-radius:8px;padding:16px;margin:18px 0}svg{max-width:100%;height:auto}.charts{display:grid;grid-template-columns:1fr 1fr;gap:14px}.charts section{border:1px solid #dce5dc;border-radius:8px;padding:14px;break-inside:avoid}.charts h2{font-size:18px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f6f3;padding:14px;font-size:12px}.notice{background:#f4f5ed;padding:12px;border-left:4px solid #527b58}@media print{body{margin:0;max-width:none}.charts{display:block}section{break-inside:avoid}a{color:inherit}}</style></head><body><header><h1>TRACE Audit Report</h1><div class="meta">Engagement: ${escapeReportHtml(report?.engagement?.name || report?.engagement_id || 'Selected engagement')} · Version: ${escapeReportHtml(report?.report_version ?? '—')} · Generated: ${escapeReportHtml(report?.generated_at || new Date().toISOString())}</div></header><p class="notice">This report summarizes uploaded data and deterministic checks. It requires human review and is not an audit opinion or assurance conclusion.</p><h2>Summary</h2><table><tbody>${summaryRows}</tbody></table><h2>Visualizations</h2><div class="charts">${chartMarkup}</div><h2>Discrepancy review</h2><table><thead><tr><th>Issue</th><th>Code</th><th>Rows</th><th>Absolute variance</th></tr></thead><tbody>${discrepancyMarkup}</tbody></table><h2>Analyzed uploads</h2><table><thead><tr><th>File</th><th>Dataset type</th><th>Rows</th><th>Columns</th></tr></thead><tbody>${datasetMarkup}</tbody></table><h2>Findings</h2><table><thead><tr><th>Finding</th><th>Severity</th><th>Status</th><th>Description</th></tr></thead><tbody>${findingMarkup}</tbody></table><h2>Procedure runs</h2><ul>${procedureMarkup}</ul><h2>Workpaper CSV</h2><p>The accompanying CSV contains the exported engagement workpaper data. Open the CSV file included beside this HTML report in the downloaded ZIP.</p><h2>Full report data</h2><details><summary>View JSON source</summary><pre>${rawData}</pre></details></body></html>`;
 }
 
 function formatAmount(value) { return value == null ? '—' : new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(Number(value)); }
@@ -209,7 +312,7 @@ function Dashboard({ role, engagements, onCreate }) {
 }
 
 function Workspace() {
-  const location = useLocation(), go = useNavigate(); const [session, setSession] = useState(null), [authError, setAuthError] = useState(''), [engagements, setEngagements] = useState([]), [engagementError, setEngagementError] = useState(''), [engagementId, setEngagementId] = useState(''), [collapsed, setCollapsed] = useState(false), [mobile, setMobile] = useState(false), [searchOpen, setSearchOpen] = useState(false), [search, setSearch] = useState('');
+  const location = useLocation(), go = useNavigate(); const [session, setSession] = useState(null), [authError, setAuthError] = useState(''), [engagements, setEngagements] = useState([]), [engagementError, setEngagementError] = useState(''), [engagementId, setEngagementId] = useState(''), [assignmentEngagement, setAssignmentEngagement] = useState(null), [collapsed, setCollapsed] = useState(false), [mobile, setMobile] = useState(false), [searchOpen, setSearchOpen] = useState(false), [search, setSearch] = useState('');
   const token = sessionStorage.getItem('trace-access-token');
   useEffect(() => { let alive = true; if (!token) { setAuthError('Sign in to continue.'); return; } api('/auth/me').then(user => { if (alive) { setSession(user); if (location.pathname.split('/')[2] !== user.role) go(`/app/${user.role}`, { replace: true }); } }).catch(e => { if (alive) { clearSession(); setAuthError(e.message); } }); return () => { alive = false; }; }, [token, location.pathname, go]);
   const role = session?.role; const base = role ? `/app/${role}` : '/app'; const slug = location.pathname.replace(base, '').replace(/^\//, '');
@@ -218,7 +321,7 @@ function Workspace() {
   if (authError) return <Navigate to="/signin" replace state={{ error: authError }}/>;
   if (!session) return <div className="workspace"><main className="workspace-main"><p>Loading account…</p></main></div>;
   const groups = nav[role] || []; const title = groups.flatMap(g => g[1]).find(x => x[1] === slug)?.[0] || 'Overview';
-  const page = slug === 'profile' ? <Profile/> : slug === 'new-audit' && role === 'client' ? <NewAudit onCreated={item => { setEngagements(old => [item, ...old]); setEngagementId(item.id); go(`${base}/projects`); }}/> : slug === 'projects' || slug === 'requests' ? <div className="stack"><Header eyebrow={roles[role]} title={slug === 'requests' ? 'Engagement requests' : 'Audit projects'} desc="Engagements visible to this account."/><ErrorBox error={engagementError}/>{engagements.length ? <EngagementTable engagements={engagements}/> : <Empty>No engagements are available.</Empty>}</div> : slug === 'documents' ? <Documents engagements={engagements} engagementId={engagementId} setEngagementId={setEngagementId}/> : slug === 'archive' ? <Archive engagements={engagements} engagementId={engagementId} setEngagementId={setEngagementId}/> : slug === 'reports' ? <Reports engagements={engagements} engagementId={engagementId} setEngagementId={setEngagementId}/> : ['procedures', 'checks'].includes(slug) ? <Procedures engagements={engagements} engagementId={engagementId} setEngagementId={setEngagementId}/> : slug === 'sampling' ? <Sampling engagements={engagements} engagementId={engagementId} setEngagementId={setEngagementId}/> : ['traceability', 'audit-trail'].includes(slug) ? <Traceability engagements={engagements} engagementId={engagementId} setEngagementId={setEngagementId}/> : ['exceptions', 'findings'].includes(slug) ? <Findings engagements={engagements} engagementId={engagementId} setEngagementId={setEngagementId}/> : role === 'admin' && slug === 'users' ? <AdminUsers/> : role === 'admin' && slug === 'companies' ? <AdminDirectory kind="companies"/> : role === 'admin' && slug === 'auditors' ? <AdminDirectory kind="auditors"/> : role === 'admin' && slug === 'logs' ? <AdminLogs/> : role === 'admin' && slug === 'monitoring' ? <Monitoring/> : role === 'admin' && slug === 'security' ? <AdminLogs/> : <Dashboard role={role} engagements={engagements} onCreate={() => go(`${base}/new-audit`)}/>;
+  const page = slug === 'profile' ? <Profile/> : slug === 'new-audit' && role === 'client' ? <NewAudit onCreated={item => { setEngagements(old => [item, ...old]); setEngagementId(item.id); go(`${base}/projects`); }}/> : slug === 'projects' || slug === 'requests' ? <div className="stack"><Header eyebrow={roles[role]} title={slug === 'requests' ? 'Engagement requests' : 'Audit projects'} desc={role === 'client' ? 'Track audit stages, upload evidence, and manage auditor file access.' : 'Engagements visible to this account.'}/><ErrorBox error={engagementError}/>{role === 'client' && engagements.length > 0 && <div className="filters"><EngagementSelect engagements={engagements} value={engagementId} onChange={setEngagementId}/></div>}{engagements.length ? <EngagementTable engagements={engagements} onAssign={role === 'client' ? setAssignmentEngagement : undefined}/> : <Empty>No engagements are available.</Empty>}{role === 'client' && engagementId && <EngagementProgress engagementId={engagementId}/>}{role === 'client' && assignmentEngagement && <Assignment key={assignmentEngagement.id} engagement={assignmentEngagement} onDone={async () => { setAssignmentEngagement(null); try { const rows = await api('/engagements/'); setEngagements(rows); } catch (e) { setEngagementError(e.message); } }}/>}</div> : slug === 'documents' ? <Documents engagements={engagements} engagementId={engagementId} setEngagementId={setEngagementId}/> : slug === 'archive' ? <Archive engagements={engagements} engagementId={engagementId} setEngagementId={setEngagementId}/> : slug === 'reports' ? <Reports engagements={engagements} engagementId={engagementId} setEngagementId={setEngagementId}/> : ['procedures', 'checks'].includes(slug) ? <Procedures engagements={engagements} engagementId={engagementId} setEngagementId={setEngagementId}/> : slug === 'sampling' ? <Sampling engagements={engagements} engagementId={engagementId} setEngagementId={setEngagementId}/> : ['traceability', 'audit-trail'].includes(slug) ? <Traceability engagements={engagements} engagementId={engagementId} setEngagementId={setEngagementId}/> : ['exceptions', 'findings'].includes(slug) ? <Findings engagements={engagements} engagementId={engagementId} setEngagementId={setEngagementId}/> : role === 'admin' && slug === 'users' ? <AdminUsers/> : role === 'admin' && slug === 'companies' ? <AdminDirectory kind="companies"/> : role === 'admin' && slug === 'auditors' ? <AdminDirectory kind="auditors"/> : role === 'admin' && slug === 'logs' ? <AdminLogs/> : role === 'admin' && slug === 'monitoring' ? <Monitoring/> : role === 'admin' && slug === 'security' ? <AdminLogs/> : <Dashboard role={role} engagements={engagements} onCreate={() => go(`${base}/new-audit`)}/>;
   return <div className={`workspace ${collapsed ? 'collapsed' : ''}`}><button className={`scrim ${mobile ? 'visible' : ''}`} onClick={() => setMobile(false)} aria-label="Close navigation"/><aside className={`sidebar ${mobile ? 'mobile-open' : ''}`}><div className="side-brand"><Link className="brand" to="/">TRACE<span className="period">.</span></Link><button className="iconbtn collapse" onClick={() => setCollapsed(!collapsed)} aria-label="Collapse sidebar"><PanelLeftClose/></button></div><div className="workspace-switch"><b>{session.name?.slice(0, 1).toUpperCase() || 'U'}</b><span><strong>{session.organization || session.name}</strong><small>{roles[role]}</small></span><ChevronDown size={14}/></div><nav>{groups.map(([group, items]) => <div className="navgroup" key={group}><small>{group}</small>{items.filter(([, path]) => !(role !== 'client' && path === 'new-audit')).map(([label, path, Icon]) => <Link key={path} to={base + (path ? `/${path}` : '')} className={slug === path ? 'active' : ''} title={collapsed ? label : ''}><Icon/><span>{label}</span></Link>)}</div>)}</nav><div className="side-bottom"><button onClick={() => go(`${base}/profile`)}><User/><span>Account</span></button><div className="side-user"><b>{session.name?.slice(0, 1).toUpperCase() || 'U'}</b><span><strong>{session.name}</strong><small>{session.email}</small></span><button aria-label="Sign out" onClick={logout}><LogOut/></button></div></div></aside><main className="workspace-main"><header className="topbar"><button className="iconbtn mobile-menu" onClick={() => setMobile(true)} aria-label="Open navigation"><Menu/></button><div className="crumb">TRACE <ChevronRight/> {roles[role]} <ChevronRight/> <strong>{title}</strong></div><div className="top-actions"><span className="env"><i/> CONNECTED API</span><button className="iconbtn" aria-label="Search" onClick={() => setSearchOpen(!searchOpen)}><Search/></button><button className="avatar" onClick={() => go(`${base}/profile`)}>{session.name?.slice(0, 1).toUpperCase()}</button></div></header>{searchOpen && <div className="global-search"><Search/><input autoFocus placeholder="Search workspace pages" value={search} onChange={e => setSearch(e.target.value)}/><button className="iconbtn" onClick={() => setSearchOpen(false)}><X/></button><div>{search ? groups.flatMap(g => g[1]).filter(x => x[0].toLowerCase().includes(search.toLowerCase())).map(x => <Link key={x[1]} to={base + (x[1] ? `/${x[1]}` : '')}>{x[0]}</Link>) : 'Search navigation'}</div></div>}<div className="content">{engagementError && <ErrorBox error={engagementError}/ >}{page}</div></main></div>;
 }
 

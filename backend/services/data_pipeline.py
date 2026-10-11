@@ -81,7 +81,18 @@ def load_dataframe(filename: str, raw: bytes, *, sheet_name: str | int = 0, max_
                 raise DatasetError("JSON must contain an array of objects or an object with a records array")
             if len(payload) > max_rows:
                 raise DatasetError(f"Dataset exceeds the {max_rows:,} row processing limit")
-            df = pd.DataFrame.from_records(payload)
+            # JSON report/evidence rows can contain arrays and objects. Store those
+            # cells as JSON text so Pandas profiling operations such as nunique()
+            # do not fail on unhashable dict/list values.
+            normalized_payload = [
+                {
+                    key: json.dumps(value, ensure_ascii=False, sort_keys=True)
+                    if isinstance(value, (dict, list)) else value
+                    for key, value in row.items()
+                }
+                for row in payload
+            ]
+            df = pd.DataFrame.from_records(normalized_payload)
         if len(df) > max_rows:
             raise DatasetError(f"Dataset exceeds the {max_rows:,} row processing limit")
         raw_columns = [str(c) for c in df.columns]

@@ -68,6 +68,15 @@ class AccessGrant(Base):
     allowed: Mapped[bool] = mapped_column(Boolean, default=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
 
+class ArtifactAccessGrant(Base):
+    __tablename__ = "artifact_access_grants"
+    __table_args__ = (UniqueConstraint("artifact_id", "auditor_id"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    artifact_id: Mapped[int] = mapped_column(ForeignKey("artifacts.id", ondelete="CASCADE"), index=True)
+    engagement_id: Mapped[int] = mapped_column(ForeignKey("engagements.id", ondelete="CASCADE"), index=True)
+    auditor_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
 class AuditEvent(Base):
     __tablename__ = "audit_events"
     id: Mapped[int] = mapped_column(primary_key=True)

@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from .database import Base, DATA_DIR, engine, get_db
-from .models import AccessGrant, AdminAuditEvent, Artifact, AuditEvent, AuditSnapshot, Company, Engagement, EvidenceRequest, Finding, LoginAttempt, ProcedureRun, ReportVersion, SamplingRun, SecurityEvent, User, now
+from .models import AccessGrant, AdminAuditEvent, Artifact, ArtifactAccessGrant, AuditEvent, AuditSnapshot, Company, Engagement, EvidenceRequest, Finding, LoginAttempt, ProcedureRun, ReportVersion, SamplingRun, SecurityEvent, User, now
 from .migrations import migrate
 from .services.data_pipeline import DatasetError, SUPPORTED_EXTENSIONS, dataframe_records, load_dataframe, profile_dataframe
 from .services.audit_engine import CHECKS, deterministic_sample, execute_check, risk_indicators, run_checks
@@ -137,9 +137,11 @@ class EngagementPatch(BaseModel):
 class AssignIn(BaseModel):
     auditor_id: int
     allowed_fields: list[str] = Field(default_factory=list)
+    allowed_artifact_ids: list[str] | None = None
 
 class GrantsIn(BaseModel):
     allowed_fields: list[str]
+    allowed_artifact_ids: list[str] | None = None
 
 class CheckIn(BaseModel):
     procedure: str = Field(min_length=2, max_length=100)
@@ -207,13 +209,46 @@ def can_view_engagement(db: Session, user: User, engagement: Engagement):
     if user.role == "auditor" and user.id == engagement.auditor_id: return
     raise HTTPException(404, "Engagement not found")
 
-def can_view_artifact(db: Session, user: User, engagement: Engagement):
+def can_view_artifact(db: Session, user: User, engagement: Engagement, artifact: Artifact | None = None):
     can_view_engagement(db, user, engagement)
     if user.role == "admin": raise HTTPException(403, "Administrators cannot access evidence documents")
     if user.role == "auditor" and not db.scalar(select(AccessGrant.id).where(AccessGrant.engagement_id == engagement.id, AccessGrant.auditor_id == user.id, AccessGrant.field_name == "documents", AccessGrant.allowed.is_(True))):
         raise HTTPException(403, "The client has not granted document access")
+    if artifact is not None and user.role == "auditor":
+        scope = artifact_scope(db, user, engagement)
+        if scope is not None and artifact.id not in scope: raise HTTPException(404, "Artifact not found")
 
 ACCESS_FIELDS = {"organization", "period", "scope", "required_records", "documents", "transactions", "findings", "events", "report", "checks", "sampling", "compliance"}
+
+def artifact_scope(db: Session, user: User, engagement: Engagement) -> set[int] | None:
+    """None means legacy engagement-wide document access; a set is an explicit file scope."""
+    if user.role != "auditor": return None
+    documents_allowed = db.scalar(select(AccessGrant.id).where(
+        AccessGrant.engagement_id == engagement.id, AccessGrant.auditor_id == user.id,
+        AccessGrant.field_name == "documents", AccessGrant.allowed.is_(True),
+    ))
+    if not documents_allowed: return set()
+    scoped = db.scalar(select(AccessGrant.id).where(
+        AccessGrant.engagement_id == engagement.id, AccessGrant.auditor_id == user.id,
+        AccessGrant.field_name == "documents_scoped", AccessGrant.allowed.is_(True),
+    ))
+    if not scoped: return None
+    return set(db.scalars(select(ArtifactAccessGrant.artifact_id).where(
+        ArtifactAccessGrant.engagement_id == engagement.id,
+        ArtifactAccessGrant.auditor_id == user.id,
+    )).all())
+
+def visible_artifacts(db: Session, engagement: Engagement, user: User, artifacts: list[Artifact] | None = None) -> list[Artifact]:
+    if artifacts is None:
+        artifacts = db.scalars(select(Artifact).where(Artifact.engagement_id == engagement.id).order_by(Artifact.created_at.desc())).all()
+    scope = artifact_scope(db, user, engagement)
+    return artifacts if scope is None else [artifact for artifact in artifacts if artifact.id in scope]
+
+def validated_artifact_ids(db: Session, engagement: Engagement, ids: list[str]) -> list[Artifact]:
+    unique_ids = list(dict.fromkeys(ids))
+    artifacts = db.scalars(select(Artifact).where(Artifact.engagement_id == engagement.id, Artifact.public_id.in_(unique_ids))).all() if unique_ids else []
+    if len(artifacts) != len(unique_ids): raise HTTPException(422, "One or more selected files do not belong to this engagement")
+    return artifacts
 def require_grant(db: Session, user: User, engagement: Engagement, field: str):
     can_view_engagement(db, user, engagement)
     if user.role == "admin" and field != "events":
@@ -377,6 +412,50 @@ def list_engagements(user: UserDep, db: DbDep):
 def read_engagement(engagement_id: str, user: UserDep, db: DbDep):
     e = get_engagement(db, engagement_id); can_view_engagement(db, user, e); return engagement_out(db, e, user)
 
+@app.get("/api/v1/engagements/{engagement_id}/progress", tags=["engagements"])
+def engagement_progress(engagement_id: str, user: UserDep, db: DbDep):
+    e = get_engagement(db, engagement_id)
+    if user.role != "client" or user.id != e.client_id:
+        raise HTTPException(403, "Engagement progress is available to its client")
+
+    artifacts = db.scalars(select(Artifact).where(Artifact.engagement_id == e.id).order_by(Artifact.created_at.asc())).all()
+    procedures = db.scalars(select(ProcedureRun).where(ProcedureRun.engagement_id == e.id).order_by(ProcedureRun.created_at.asc())).all()
+    samplings = db.scalars(select(SamplingRun).where(SamplingRun.engagement_id == e.id)).all()
+    findings = db.scalars(select(Finding).where(Finding.engagement_id == e.id)).all()
+    requests = db.scalars(select(EvidenceRequest).where(EvidenceRequest.engagement_id == e.id)).all()
+    report_versions = db.scalars(select(ReportVersion).where(ReportVersion.engagement_id == e.id).order_by(ReportVersion.created_at.desc())).all()
+    reports = [item for item in report_versions if "revenue_analysis" in json.loads(item.report_json)]
+    finding_reviews = db.scalars(select(AuditEvent.created_at).where(AuditEvent.engagement_id == e.id, AuditEvent.event_type == "finding.reviewed")).all()
+
+    def as_utc(value: datetime) -> datetime:
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+    latest_source_update = max(
+        [as_utc(item.created_at) for item in artifacts]
+        + [as_utc(item.created_at) for item in procedures]
+        + [as_utc(item.created_at) for item in findings]
+        + [as_utc(item) for item in finding_reviews]
+        + [as_utc(e.created_at)]
+        + [as_utc(e.updated_at)]
+    )
+    latest_report = reports[0] if reports else None
+    report_is_current = bool(latest_report and as_utc(latest_report.created_at) >= latest_source_update)
+    unresolved_findings = [item for item in findings if item.status not in {"accepted", "rejected"}]
+    pending_requests = [item for item in requests if item.status not in {"accepted", "fulfilled"}]
+    procedures_complete = bool(procedures)
+
+    steps = [
+        {"key": "created", "title": "Engagement created", "status": "complete", "detail": f"Created {as_utc(e.created_at).date().isoformat()}."},
+        {"key": "assigned", "title": "Auditor assigned", "status": "complete" if e.auditor_id else "pending", "detail": "An auditor is assigned." if e.auditor_id else "Choose an auditor and set their access."},
+        {"key": "evidence", "title": "Evidence uploaded", "status": "complete" if artifacts else "pending", "detail": f"{len(artifacts)} file(s) uploaded." if artifacts else "Upload the records needed for this engagement."},
+        {"key": "procedures", "title": "Audit procedures run", "status": "complete" if procedures_complete else "pending", "detail": f"{len(procedures)} procedure run(s); {len(samplings)} sampling run(s)." if procedures_complete else "Run at least one audit check against uploaded data."},
+        {"key": "findings", "title": "Findings reviewed", "status": "complete" if procedures_complete and not unresolved_findings else "pending", "detail": "No unresolved findings." if procedures_complete and not unresolved_findings else f"{len(unresolved_findings)} finding(s) still need review." if unresolved_findings else "Run procedures before findings can be reviewed."},
+        {"key": "requests", "title": "Evidence requests resolved", "status": "complete" if not pending_requests else "pending", "detail": "No open evidence requests." if not pending_requests else f"{len(pending_requests)} evidence request(s) remain unresolved."},
+        {"key": "report", "title": "Current report generated", "status": "complete" if report_is_current else "pending", "detail": "The latest report includes current evidence and procedure results." if report_is_current else "Generate or regenerate the report after completing recent audit work." if latest_report else "Generate the final report after audit work is complete."},
+    ]
+    complete_count = sum(step["status"] == "complete" for step in steps)
+    return {"engagement_id": e.public_id, "completed_steps": complete_count, "total_steps": len(steps), "percent_complete": round(complete_count * 100 / len(steps)), "steps": steps}
+
 @app.patch("/api/v1/engagements/{engagement_id}", tags=["engagements"])
 def update_engagement(engagement_id: str, body: EngagementPatch, user: UserDep, db: DbDep):
     e = get_engagement(db, engagement_id)
@@ -393,11 +472,33 @@ def assign_auditor(engagement_id: str, body: AssignIn, user: UserDep, db: DbDep)
     auditor = db.get(User, body.auditor_id)
     if not auditor or auditor.role != "auditor" or not auditor.active: raise HTTPException(404, "Active auditor not found")
     if set(body.allowed_fields) - ACCESS_FIELDS: raise HTTPException(422, f"Unknown access fields: {sorted(set(body.allowed_fields) - ACCESS_FIELDS)}")
+    if body.allowed_artifact_ids is not None and "documents" not in body.allowed_fields and body.allowed_artifact_ids:
+        raise HTTPException(422, "File access requires the documents permission")
+    selected_artifacts = validated_artifact_ids(db, e, body.allowed_artifact_ids or []) if body.allowed_artifact_ids is not None else []
     e.auditor_id = auditor.id; e.status = "Assigned"
+    db.query(ArtifactAccessGrant).filter_by(engagement_id=e.id, auditor_id=auditor.id).delete()
     db.query(AccessGrant).filter_by(engagement_id=e.id, auditor_id=auditor.id).delete()
     for field in set(body.allowed_fields): db.add(AccessGrant(engagement_id=e.id, auditor_id=auditor.id, field_name=field, allowed=True))
-    add_event(db, e, user, "engagement.auditor_assigned", {"auditor_id": auditor.id, "allowed_fields": sorted(set(body.allowed_fields))}); db.commit()
-    return {"engagement": engagement_out(db, e, user), "auditor": {"id": auditor.id, "name": auditor.name, "email": auditor.email}, "allowed_fields": sorted(set(body.allowed_fields))}
+    if body.allowed_artifact_ids is not None and "documents" in body.allowed_fields:
+        db.add(AccessGrant(engagement_id=e.id, auditor_id=auditor.id, field_name="documents_scoped", allowed=True))
+        for artifact in selected_artifacts:
+            db.add(ArtifactAccessGrant(engagement_id=e.id, auditor_id=auditor.id, artifact_id=artifact.id))
+    add_event(db, e, user, "engagement.auditor_assigned", {"auditor_id": auditor.id, "allowed_fields": sorted(set(body.allowed_fields)), "file_scope_count": len(selected_artifacts) if body.allowed_artifact_ids is not None else None, "allowed_artifact_ids": sorted(a.public_id for a in selected_artifacts) if body.allowed_artifact_ids is not None else None}); db.commit()
+    return {"engagement": engagement_out(db, e, user), "auditor": {"id": auditor.id, "name": auditor.name, "email": auditor.email}, "allowed_fields": sorted(set(body.allowed_fields)), "allowed_artifact_ids": sorted(a.public_id for a in selected_artifacts) if body.allowed_artifact_ids is not None else None}
+
+@app.get("/api/v1/engagements/{engagement_id}/access", tags=["engagements"])
+def get_access(engagement_id: str, user: UserDep, db: DbDep):
+    e = get_engagement(db, engagement_id)
+    if user.role != "client" or user.id != e.client_id: raise HTTPException(403, "Only the engagement client can manage auditor access")
+    artifacts = db.scalars(select(Artifact).where(Artifact.engagement_id == e.id).order_by(Artifact.created_at.desc())).all()
+    if not e.auditor_id:
+        return {"auditor_id": None, "allowed_fields": [], "documents_scoped": True, "allowed_artifact_ids": []}
+    grants = db.scalars(select(AccessGrant).where(AccessGrant.engagement_id == e.id, AccessGrant.auditor_id == e.auditor_id, AccessGrant.allowed.is_(True))).all()
+    fields = {grant.field_name for grant in grants if grant.field_name in ACCESS_FIELDS}
+    scoped = any(grant.field_name == "documents_scoped" for grant in grants)
+    selected = db.scalars(select(ArtifactAccessGrant.artifact_id).where(ArtifactAccessGrant.engagement_id == e.id, ArtifactAccessGrant.auditor_id == e.auditor_id)).all() if scoped else [a.id for a in artifacts]
+    by_id = {a.id: a.public_id for a in artifacts}
+    return {"auditor_id": e.auditor_id, "allowed_fields": sorted(fields), "documents_scoped": scoped, "allowed_artifact_ids": [by_id[i] for i in selected if i in by_id]}
 
 @app.put("/api/v1/engagements/{engagement_id}/access", tags=["engagements"])
 def update_access(engagement_id: str, body: GrantsIn, user: UserDep, db: DbDep):
@@ -405,10 +506,25 @@ def update_access(engagement_id: str, body: GrantsIn, user: UserDep, db: DbDep):
     if user.id != e.client_id or user.role != "client": raise HTTPException(403, "Only the client can change auditor access")
     if not e.auditor_id: raise HTTPException(409, "Assign an auditor first")
     if set(body.allowed_fields) - ACCESS_FIELDS: raise HTTPException(422, f"Unknown access fields: {sorted(set(body.allowed_fields) - ACCESS_FIELDS)}")
+    if body.allowed_artifact_ids is not None and "documents" not in body.allowed_fields and body.allowed_artifact_ids:
+        raise HTTPException(422, "File access requires the documents permission")
+    existing_scope = db.scalar(select(AccessGrant.id).where(AccessGrant.engagement_id == e.id, AccessGrant.auditor_id == e.auditor_id, AccessGrant.field_name == "documents_scoped", AccessGrant.allowed.is_(True)))
+    selected_artifacts = validated_artifact_ids(db, e, body.allowed_artifact_ids or []) if body.allowed_artifact_ids is not None else (
+        db.scalars(select(Artifact).join(ArtifactAccessGrant, Artifact.id == ArtifactAccessGrant.artifact_id).where(ArtifactAccessGrant.engagement_id == e.id, ArtifactAccessGrant.auditor_id == e.auditor_id)).all() if existing_scope else None
+    )
+    db.query(ArtifactAccessGrant).filter_by(engagement_id=e.id, auditor_id=e.auditor_id).delete()
     db.query(AccessGrant).filter_by(engagement_id=e.id, auditor_id=e.auditor_id).delete()
     for field in set(body.allowed_fields): db.add(AccessGrant(engagement_id=e.id, auditor_id=e.auditor_id, field_name=field, allowed=True))
-    add_event(db, e, user, "engagement.access_updated", {"allowed_fields": sorted(set(body.allowed_fields))}); db.commit()
-    return {"allowed_fields": sorted(set(body.allowed_fields))}
+    if selected_artifacts is not None and "documents" in body.allowed_fields:
+        db.add(AccessGrant(engagement_id=e.id, auditor_id=e.auditor_id, field_name="documents_scoped", allowed=True))
+        for artifact in selected_artifacts:
+            db.add(ArtifactAccessGrant(engagement_id=e.id, auditor_id=e.auditor_id, artifact_id=artifact.id))
+    elif body.allowed_artifact_ids is None and existing_scope:
+        db.add(AccessGrant(engagement_id=e.id, auditor_id=e.auditor_id, field_name="documents_scoped", allowed=True))
+        for artifact in selected_artifacts or []:
+            db.add(ArtifactAccessGrant(engagement_id=e.id, auditor_id=e.auditor_id, artifact_id=artifact.id))
+    add_event(db, e, user, "engagement.access_updated", {"allowed_fields": sorted(set(body.allowed_fields)), "file_scope_count": len(selected_artifacts) if selected_artifacts is not None else None, "allowed_artifact_ids": sorted(a.public_id for a in selected_artifacts) if selected_artifacts is not None else None}); db.commit()
+    return {"allowed_fields": sorted(set(body.allowed_fields)), "allowed_artifact_ids": sorted(a.public_id for a in selected_artifacts) if selected_artifacts is not None else None}
 
 def _profile_bytes(filename: str, raw: bytes):
     result = {"format": Path(filename).suffix.lower().lstrip("."), "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "rows": None, "columns": [], "missing_values": {}, "numeric_summary": {}}
@@ -443,11 +559,23 @@ async def upload_file(engagement_id: str, user: UserDep, db: DbDep, file: Upload
         raise HTTPException(422, "File extension does not match a valid Office document")
     digest = hashlib.sha256(raw).hexdigest(); artifact_id = str(uuid4())
     dest = UPLOAD_DIR / f"{artifact_id}{Path(safe_name).suffix.lower()}"
-    dest.write_bytes(raw)
-    try: dest.chmod(0o600)
-    except OSError: pass
-    artifact = Artifact(public_id=artifact_id, engagement_id=e.id, uploader_id=user.id, filename=safe_name, content_type=file.content_type or "application/octet-stream", storage_path=str(dest), sha256=digest, size=len(raw), validation_json=json.dumps({"status": "uploaded", "profile": _profile_bytes(safe_name, raw)}))
-    db.add(artifact); add_event(db, e, user, "evidence.uploaded", {"artifact_id": artifact_id, "filename": safe_name, "sha256": digest, "size": len(raw)}); db.commit()
+    validation_json = json.dumps({"status": "uploaded", "profile": _profile_bytes(safe_name, raw)})
+    artifact = Artifact(public_id=artifact_id, engagement_id=e.id, uploader_id=user.id, filename=safe_name, content_type=file.content_type or "application/octet-stream", storage_path=str(dest), sha256=digest, size=len(raw), validation_json=validation_json)
+    try:
+        dest.write_bytes(raw)
+        try: dest.chmod(0o600)
+        except OSError: pass
+        db.add(artifact)
+        db.flush()
+        if user.role == "auditor" and artifact_scope(db, user, e) is not None:
+            db.add(ArtifactAccessGrant(engagement_id=e.id, auditor_id=user.id, artifact_id=artifact.id))
+        add_event(db, e, user, "evidence.uploaded", {"artifact_id": artifact_id, "filename": safe_name, "sha256": digest, "size": len(raw)})
+        db.commit()
+    except Exception:
+        db.rollback()
+        try: dest.unlink(missing_ok=True)
+        except OSError: pass
+        raise
     return artifact_out(artifact)
 
 def artifact_out(a: Artifact):
@@ -456,13 +584,14 @@ def artifact_out(a: Artifact):
 @app.get("/api/v1/uploads/{engagement_id}/uploads", tags=["uploads"])
 def list_uploads(engagement_id: str, user: UserDep, db: DbDep):
     e = get_engagement(db, engagement_id); can_view_artifact(db, user, e)
-    return [artifact_out(a) for a in db.scalars(select(Artifact).where(Artifact.engagement_id == e.id).order_by(Artifact.created_at.desc())).all()]
+    return [artifact_out(a) for a in visible_artifacts(db, e, user)]
 
 @app.get("/api/v1/uploads/{engagement_id}/uploads/{artifact_id}/download", tags=["uploads"])
 def download_upload(engagement_id: str, artifact_id: str, user: UserDep, db: DbDep):
     e = get_engagement(db, engagement_id); can_view_artifact(db, user, e)
     a = db.scalar(select(Artifact).where(Artifact.engagement_id == e.id, Artifact.public_id == artifact_id))
     if not a: raise HTTPException(404, "Artifact not found")
+    can_view_artifact(db, user, e, a)
     return Response(Path(a.storage_path).read_bytes(), media_type=a.content_type, headers={"Content-Disposition": f'attachment; filename="{a.filename}"', "X-Content-SHA256": a.sha256})
 
 @app.post("/api/v1/uploads/{engagement_id}/validate/{artifact_id}", tags=["uploads"])
@@ -470,6 +599,7 @@ def validate_upload(engagement_id: str, artifact_id: str, user: UserDep, db: DbD
     e = get_engagement(db, engagement_id); can_view_artifact(db, user, e)
     a = db.scalar(select(Artifact).where(Artifact.engagement_id == e.id, Artifact.public_id == artifact_id))
     if not a: raise HTTPException(404, "Artifact not found")
+    can_view_artifact(db, user, e, a)
     raw = Path(a.storage_path).read_bytes(); profile = _profile_bytes(a.filename, raw)
     if hashlib.sha256(raw).hexdigest() != a.sha256: raise HTTPException(409, "Stored evidence integrity check failed")
     payload = {"status": "validated", "sha256_verified": True, "profile": profile, "validated_at": now().isoformat()}
@@ -497,8 +627,8 @@ def _xlsx_rows(raw: bytes):
     finally:
         workbook.close()
 
-def csv_dataset_for_engagement(db: Session, e: Engagement):
-    artifacts = db.scalars(select(Artifact).where(Artifact.engagement_id == e.id).order_by(Artifact.created_at.desc())).all()
+def csv_dataset_for_engagement(db: Session, e: Engagement, user: User):
+    artifacts = visible_artifacts(db, e, user)
     for a in artifacts:
         if Path(a.filename).suffix.lower() in SUPPORTED_EXTENSIONS:
             try:
@@ -511,11 +641,12 @@ def csv_dataset_for_engagement(db: Session, e: Engagement):
 @app.post("/api/v1/audit/{engagement_id}/snapshots", status_code=201, tags=["audit"])
 def create_snapshot(engagement_id: str, user: UserDep, db: DbDep):
     e = get_engagement(db, engagement_id); can_view_artifact(db, user, e)
-    a, columns, rows = csv_dataset_for_engagement(db, e)
+    a, columns, rows = csv_dataset_for_engagement(db, e, user)
     if not a: raise HTTPException(409, "Upload a supported tabular dataset before creating a snapshot")
     profile = _profile_bytes(a.filename, Path(a.storage_path).read_bytes()).get("profile", {})
     snapshot_id = str(uuid4())
-    parent = db.scalar(select(AuditSnapshot).where(AuditSnapshot.engagement_id == e.id).order_by(AuditSnapshot.id.desc()).limit(1))
+    allowed_hashes = {item.sha256 for item in visible_artifacts(db, e, user)}
+    parent = db.scalar(select(AuditSnapshot).where(AuditSnapshot.engagement_id == e.id, AuditSnapshot.dataset_hash.in_(allowed_hashes)).order_by(AuditSnapshot.id.desc()).limit(1)) if allowed_hashes else None
     snapshot = AuditSnapshot(engagement_id=e.id, actor_id=user.id, artifact_id=a.public_id, dataset_hash=a.sha256, row_count=len(rows), columns_json=json.dumps(columns), profile_json=json.dumps(profile), parent_snapshot_id=parent.id if parent else None)
     db.add(snapshot)
     add_event(db, e, user, "audit.snapshot_created", {"artifact_id": a.public_id, "sha256": a.sha256, "parent_snapshot_id": snapshot.parent_snapshot_id, "rows": profile.get("rows"), "columns": columns}); db.commit()
@@ -525,7 +656,7 @@ def create_snapshot(engagement_id: str, user: UserDep, db: DbDep):
 def run_check(engagement_id: str, body: CheckIn, user: UserDep, db: DbDep):
     require_role(user, "auditor", "client")
     e = get_engagement(db, engagement_id); require_grant(db, user, e, "checks"); can_view_artifact(db, user, e)
-    a, columns, rows = csv_dataset_for_engagement(db, e)
+    a, columns, rows = csv_dataset_for_engagement(db, e, user)
     if not a: raise HTTPException(409, "Upload a CSV or TSV dataset before running checks")
     key = body.procedure.casefold()
     check_id = key if key in CHECKS else "duplicate_invoice" if "duplicate" in key else "negative_amount" if any(term in key for term in ("financial", "amount", "numeric")) else "missing_values" if any(term in key for term in ("missing", "completeness")) else "out_of_period" if any(term in key for term in ("cutoff", "cut-off", "period")) else "duplicate_rows"
@@ -544,7 +675,9 @@ def check_catalog():
 @app.get("/api/v1/audit/{engagement_id}/checks", tags=["audit"])
 def list_checks(engagement_id: str, user: UserDep, db: DbDep):
     e = get_engagement(db, engagement_id); require_grant(db, user, e, "checks")
-    return [{"id": x.id, **json.loads(x.result_json), "created_at": x.created_at} for x in db.scalars(select(ProcedureRun).where(ProcedureRun.engagement_id == e.id).order_by(ProcedureRun.id.desc())).all()]
+    allowed_ids = {a.public_id for a in visible_artifacts(db, e, user)}
+    rows = db.scalars(select(ProcedureRun).where(ProcedureRun.engagement_id == e.id).order_by(ProcedureRun.id.desc())).all()
+    return [{"id": x.id, **result, "created_at": x.created_at} for x in rows if (result := json.loads(x.result_json)).get("dataset_artifact_id") in allowed_ids]
 
 @app.post("/api/v1/audit/{engagement_id}/findings", status_code=201, tags=["audit"])
 def create_finding(engagement_id: str, body: FindingIn, user: UserDep, db: DbDep):
@@ -576,8 +709,9 @@ def create_evidence_request(engagement_id: str, body: EvidenceRequestIn, user: U
 def list_evidence_requests(engagement_id: str, user: UserDep, db: DbDep):
     e = get_engagement(db, engagement_id); can_view_engagement(db, user, e)
     if user.role == "auditor": require_grant(db, user, e, "findings")
+    visible_ids = {a.public_id for a in visible_artifacts(db, e, user)}
     document_granted = user.role != "auditor" or bool(db.scalar(select(AccessGrant.id).where(AccessGrant.engagement_id == e.id, AccessGrant.auditor_id == user.id, AccessGrant.field_name == "documents", AccessGrant.allowed.is_(True))))
-    return [{"id": x.id, "description": x.description, "status": x.status, "due_date": x.due_date, "artifact_id": x.artifact_public_id if document_granted else None, "response_note": x.response_note, "created_at": x.created_at, "updated_at": x.updated_at} for x in db.scalars(select(EvidenceRequest).where(EvidenceRequest.engagement_id == e.id).order_by(EvidenceRequest.id.desc())).all()]
+    return [{"id": x.id, "description": x.description, "status": x.status, "due_date": x.due_date, "artifact_id": x.artifact_public_id if document_granted and (user.role != "auditor" or x.artifact_public_id in visible_ids) else None, "response_note": x.response_note, "created_at": x.created_at, "updated_at": x.updated_at} for x in db.scalars(select(EvidenceRequest).where(EvidenceRequest.engagement_id == e.id).order_by(EvidenceRequest.id.desc())).all()]
 
 @app.patch("/api/v1/audit/{engagement_id}/evidence-requests/{request_id}", tags=["audit"])
 def update_evidence_request(engagement_id: str, request_id: int, body: EvidenceRequestUpdate, user: UserDep, db: DbDep):
@@ -602,7 +736,9 @@ def update_evidence_request(engagement_id: str, request_id: int, body: EvidenceR
     request.updated_at = now()
     add_event(db, e, user, event_type, {"request_id": request.id, "status": request.status, "artifact_id": request.artifact_public_id})
     db.commit()
-    return {"id": request.id, "status": request.status, "artifact_id": request.artifact_public_id, "response_note": request.response_note, "updated_at": request.updated_at}
+    visible_ids = {a.public_id for a in visible_artifacts(db, e, user)}
+    artifact_id = request.artifact_public_id if user.role != "auditor" or request.artifact_public_id in visible_ids else None
+    return {"id": request.id, "status": request.status, "artifact_id": artifact_id, "response_note": request.response_note, "updated_at": request.updated_at}
 
 @app.post("/api/v1/audit/{engagement_id}/review-decisions", status_code=201, tags=["audit"])
 def review_finding(engagement_id: str, body: ReviewIn, user: UserDep, db: DbDep):
@@ -622,7 +758,17 @@ def list_events(engagement_id: str, user: UserDep, db: DbDep):
     if user.role == "admin": query = query.where(AuditEvent.actor_id == user.id)
     rows = db.scalars(query.order_by(AuditEvent.id.desc())).all()
     # Admin receives only abstract event metadata; event details can include sensitive field names.
-    return [{"id": x.id, "type": x.event_type, "actor_id": x.actor_id, "created_at": x.created_at, "previous_hash": x.previous_hash, "event_hash": x.event_hash, "details": {} if user.role == "admin" else json.loads(x.detail_json)} for x in rows]
+    allowed_ids = {a.public_id for a in visible_artifacts(db, e, user)} if user.role == "auditor" else None
+    def event_details(event):
+        if user.role == "admin": return {}
+        details = json.loads(event.detail_json)
+        if allowed_ids is not None:
+            artifact_keys = ("artifact_id", "baseline_artifact_id", "current_artifact_id")
+            if any(details.get(key) and details[key] not in allowed_ids for key in artifact_keys): return {}
+            listed_ids = details.get("allowed_artifact_ids")
+            if isinstance(listed_ids, list) and any(item not in allowed_ids for item in listed_ids): return {}
+        return details
+    return [{"id": x.id, "type": x.event_type, "actor_id": x.actor_id, "created_at": x.created_at, "previous_hash": x.previous_hash, "event_hash": x.event_hash, "details": event_details(x)} for x in rows]
 
 @app.get("/api/v1/audit/{engagement_id}/audit-integrity", tags=["audit"])
 def verify_integrity(engagement_id: str, user: UserDep, db: DbDep):
@@ -641,13 +787,16 @@ def verify_integrity(engagement_id: str, user: UserDep, db: DbDep):
 @app.get("/api/v1/audit/{engagement_id}/report", tags=["audit"])
 def generate_report(engagement_id: str, user: UserDep, db: DbDep):
     e = get_engagement(db, engagement_id); require_grant(db, user, e, "report")
-    runs = db.scalars(select(ProcedureRun).where(ProcedureRun.engagement_id == e.id).order_by(ProcedureRun.id.asc())).all()
+    visible = visible_artifacts(db, e, user)
+    visible_ids = {a.public_id for a in visible}
+    visible_hashes = {a.sha256 for a in visible}
+    runs = [run for run in db.scalars(select(ProcedureRun).where(ProcedureRun.engagement_id == e.id).order_by(ProcedureRun.id.asc())).all() if json.loads(run.result_json).get("dataset_artifact_id") in visible_ids]
     findings = db.scalars(select(Finding).where(Finding.engagement_id == e.id).order_by(Finding.id.asc())).all()
-    artifacts = db.scalars(select(Artifact).where(Artifact.engagement_id == e.id).order_by(Artifact.created_at.asc())).all()
+    artifacts = list(reversed(visible))
     profile = json.loads(artifacts[-1].validation_json).get("profile", {}) if artifacts else {}
     revenue_analysis = analyze_revenue_datasets(artifacts)
     result = {"engagement": engagement_out(db, e, user), "generated_at": now().isoformat(), "dataset_versions": [{"artifact_id": a.public_id, "filename": a.filename, "sha256": a.sha256, "uploaded_at": a.created_at} for a in artifacts], "latest_dataset_profile": profile, "revenue_analysis": revenue_analysis, "procedure_runs": [{"id": r.id, **json.loads(r.result_json), "created_at": r.created_at} for r in runs], "findings": [finding_out(f) for f in findings], "human_review_required": True, "disclaimer": "This generated workpaper summarizes uploaded data and deterministic checks. It is not an audit opinion or assurance conclusion."}
-    latest_snapshot = db.scalar(select(AuditSnapshot).where(AuditSnapshot.engagement_id == e.id).order_by(AuditSnapshot.id.desc()).limit(1))
+    latest_snapshot = db.scalar(select(AuditSnapshot).where(AuditSnapshot.engagement_id == e.id, AuditSnapshot.dataset_hash.in_(visible_hashes)).order_by(AuditSnapshot.id.desc()).limit(1)) if visible_hashes else None
     latest_artifact_hash = artifacts[-1].sha256 if artifacts else None
     snapshot_id = latest_snapshot.id if latest_snapshot and latest_snapshot.dataset_hash == latest_artifact_hash else None
     prior_versions = db.scalars(select(ReportVersion.version).where(ReportVersion.engagement_id == e.id)).all()
@@ -670,7 +819,7 @@ def report_versions(engagement_id: str, user: UserDep, db: DbDep):
 def continue_scan(engagement_id: str, user: UserDep, db: DbDep, key_column: str | None = None):
     require_role(user, "client", "auditor")
     e = get_engagement(db, engagement_id); can_view_artifact(db, user, e)
-    artifacts = db.scalars(select(Artifact).where(Artifact.engagement_id == e.id).order_by(Artifact.created_at.desc()).limit(2)).all()
+    artifacts = visible_artifacts(db, e, user)[:2]
     if len(artifacts) < 2: raise HTTPException(409, "Upload a revised dataset version to compare against the previous version")
     latest, baseline = artifacts[0], artifacts[1]
     try:
@@ -710,7 +859,7 @@ def continue_scan(engagement_id: str, user: UserDep, db: DbDep, key_column: str 
                     result_set.add((check["check_id"], reference.get("key_column"), reference["key"]))
         return result_set
     old_exceptions, new_exceptions = stable_exceptions(previous_checks), stable_exceptions(current_checks)
-    parent = db.scalar(select(AuditSnapshot).where(AuditSnapshot.engagement_id == e.id).order_by(AuditSnapshot.id.desc()).limit(1))
+    parent = db.scalar(select(AuditSnapshot).where(AuditSnapshot.engagement_id == e.id, AuditSnapshot.dataset_hash.in_({latest.sha256, baseline.sha256})).order_by(AuditSnapshot.id.desc()).limit(1))
     current_snapshot = parent if parent and parent.dataset_hash == latest.sha256 else None
     if current_snapshot is None:
         profile = profile_dataframe(current_df, {**current_source, "artifact_id": latest.public_id, "sha256": latest.sha256})
@@ -730,7 +879,7 @@ def continue_scan(engagement_id: str, user: UserDep, db: DbDep, key_column: str 
 def run_sampling(engagement_id: str, user: UserDep, db: DbDep, method: str = Query("random"), size: int = Query(60, ge=1, le=10000)):
     require_role(user, "auditor", "client")
     e = get_engagement(db, engagement_id); require_grant(db, user, e, "sampling")
-    a, columns, rows = csv_dataset_for_engagement(db, e)
+    a, columns, rows = csv_dataset_for_engagement(db, e, user)
     if not a: raise HTTPException(409, "Upload a CSV or TSV dataset first")
     # Stable selection tied to the uploaded snapshot for reproducibility.
     df, _ = load_dataframe(a.filename, Path(a.storage_path).read_bytes())
@@ -746,12 +895,13 @@ def run_sampling(engagement_id: str, user: UserDep, db: DbDep, method: str = Que
 @app.get("/api/v1/audit/{engagement_id}/sampling", tags=["audit"])
 def list_sampling(engagement_id: str, user: UserDep, db: DbDep):
     e = get_engagement(db, engagement_id); require_grant(db, user, e, "sampling")
-    return [{"id": r.id, **json.loads(r.result_json), "created_at": r.created_at} for r in db.scalars(select(SamplingRun).where(SamplingRun.engagement_id == e.id).order_by(SamplingRun.id.desc())).all()]
+    hashes = {a.sha256 for a in visible_artifacts(db, e, user)}
+    return [{"id": r.id, **result, "created_at": r.created_at} for r in db.scalars(select(SamplingRun).where(SamplingRun.engagement_id == e.id).order_by(SamplingRun.id.desc())).all() if (result := json.loads(r.result_json)).get("dataset_sha256") in hashes]
 
 @app.get("/api/v1/audit/{engagement_id}/transactions", tags=["audit"])
 def list_transactions(engagement_id: str, user: UserDep, db: DbDep, limit: int = Query(100, ge=1, le=1000), offset: int = Query(0, ge=0)):
     e = get_engagement(db, engagement_id); require_grant(db, user, e, "transactions")
-    a, columns, rows = csv_dataset_for_engagement(db, e)
+    a, columns, rows = csv_dataset_for_engagement(db, e, user)
     if not a: return {"items": [], "columns": [], "total": 0}
     return {"items": rows[offset:offset + limit], "columns": columns, "total": len(rows), "artifact_id": a.public_id}
 
@@ -774,7 +924,7 @@ def export_workpaper(engagement_id: str, export_type: Literal["json", "csv"], us
     e = get_engagement(db, engagement_id); require_grant(db, user, e, "report")
     granted = {g.field_name for g in db.scalars(select(AccessGrant).where(AccessGrant.engagement_id == e.id, AccessGrant.auditor_id == user.id, AccessGrant.allowed.is_(True))).all()} if user.role == "auditor" else ACCESS_FIELDS
     if export_type == "csv" and "transactions" not in granted: raise HTTPException(403, "The client has not granted transaction export access")
-    a, columns, rows = csv_dataset_for_engagement(db, e)
+    a, columns, rows = csv_dataset_for_engagement(db, e, user)
     if export_type == "csv":
         def safe_cell(value):
             if not isinstance(value, str) or not value: return value
