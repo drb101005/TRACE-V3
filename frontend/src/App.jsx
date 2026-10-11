@@ -12,7 +12,7 @@ const nav = {
   admin: [['Platform', [['Overview', '', Home], ['User management', 'users', Users], ['Company management', 'companies', Building2], ['Auditor management', 'auditors', Users], ['Audit requests', 'requests', ClipboardCheck]]], ['Operations', [['System monitoring', 'monitoring', Gauge], ['Audit logs', 'logs', History]]]]
 };
 
-function Btn({ children, kind = 'dark', ...props }) { return <button className={`btn btn-${kind}`} {...props}>{children}</button>; }
+function Btn({ children, kind = 'dark', className = '', ...props }) { return <button className={`btn btn-${kind} ${className}`.trim()} {...props}>{children}</button>; }
 function Pill({ children }) { return <span className="pill">{children}</span>; }
 function Header({ eyebrow, title, desc, action }) { return <div className="page-header"><div><small>{eyebrow}</small><h1>{title}</h1><p>{desc}</p></div>{action && <div>{action}</div>}</div>; }
 function ErrorBox({ error }) { return error ? <div className="error"><CircleAlert/><span>{error}</span></div> : null; }
@@ -35,12 +35,12 @@ function useApiData(path, dependencies = []) {
 
 function Landing() {
   const go = useNavigate();
-  return <div className="marketing"><header className="site-nav"><Link className="brand" to="/">TRACE<span className="period">.</span></Link><nav><a href="#platform">Platform</a><a href="#workflow">Workflow</a><a href="#integrity">Integrity</a></nav><div className="nav-ctas"><Btn kind="quiet" onClick={() => go('/signin')}>Sign in</Btn><Btn onClick={() => go('/signup')}>Create account <ArrowRight size={15}/></Btn></div></header>
+  return <div className="marketing"><header className="site-nav"><Link className="brand" to="/">TRACE<span className="period">.</span></Link><nav><a href="#platform">Platform</a><a href="#workflow">Workflow</a><a href="#integrity">Integrity</a></nav><div className="nav-ctas"><Btn kind="quiet" onClick={() => go('/signin')}>Sign in</Btn><Btn onClick={() => go('/signup')}> <ArrowRight size={15}/></Btn></div></header>
     <section className="hero"><div className="hero-grid"/><div className="hero-copy"><div className="eyebrow"><i/> EVIDENCE-LED REVENUE ASSURANCE</div><h1>Every audit finding<br/>should lead back to<br/><em>the evidence.</em></h1><p>TRACE connects source records, audit procedures, findings, and review history in one controlled workspace.</p><div className="hero-ctas"><Btn onClick={() => go('/signup')}>Create an account <ArrowRight size={16}/></Btn><Link className="textlink" to="/signin">Sign in</Link></div><div className="proof"><span><ShieldCheck/> Permissioned evidence</span><span><GitBranch/> Traceable procedures</span><span><User/> Human review</span></div></div><div className="hero-preview"><div className="preview-top"><span>TRACE WORKFLOW</span><span>LIVE DATA AFTER SIGN IN</span></div><div className="preview-heading"><h3>Evidence to review</h3></div>{[['01','Upload source evidence'],['02','Run deterministic procedures'],['03','Review exceptions'],['04','Preserve the audit trail']].map(([n,label]) => <div className="preview-step" key={n}><span className="step-icon">{n}</span><strong>{label}</strong></div>)}</div></section>
     <section id="platform" className="section manifesto"><div className="section-tag">THE PLATFORM</div><div className="two-col"><h2>Keep the audit work<br/><em>connected to evidence.</em></h2><div className="body-copy"><p>Upload files into an engagement, run repeatable checks, review findings, and preserve the activity history.</p><p>Every account and engagement is backed by the TRACE API and database. No example company records or sample audit results are shown in the workspace.</p></div></div></section>
     <section id="workflow" className="section dark-section"><div className="section-tag light">WORKFLOW</div><div className="step-grid">{[['Evidence','Store uploaded source files with fingerprints.'],['Analysis','Profile supported tables and execute controlled checks.'],['Review','Record findings and evidence request decisions.'],['History','Verify the persisted engagement event chain.']].map(([title, text]) => <article className="step-card" key={title}><h3>{title}</h3><p>{text}</p></article>)}</div></section>
     <section id="integrity" className="section integrity"><div className="integrity-copy"><div className="eyebrow"><i/> ACCESS CONTROL</div><h2>Data access follows the server’s grants.</h2><p>Clients control assigned auditor access. Administrators manage operations without access to confidential client documents.</p><ul><li><Check/> API-enforced permissions</li><li><Check/> Versioned reports and snapshots</li><li><Check/> Tamper-evident event history</li></ul></div></section>
-    <footer className="site-footer"><Link className="brand" to="/">TRACE<span className="period">.</span></Link><span>Evidence-led revenue assurance.</span><div><Link to="/signin">Sign in</Link><Link to="/signup">Create account</Link></div></footer>
+    <footer className="site-footer"><Link className="brand" to="/">TRACE<span className="period">.</span></Link><span>Evidence-led revenue assurance.</span><div><Link to="/signin">Sign in</Link><Link to="/signup"></Link></div></footer>
   </div>;
 }
 
@@ -60,11 +60,11 @@ function Auth({ mode }) {
     } catch (e) { setError(e.message); }
     finally { setBusy(false); }
   }
-  return <div className={`auth auth-${mode}`}><aside className="auth-side"><Link className="brand inverse" to="/">TRACE<span className="period">.</span></Link><div className="auth-story"><div className="eyebrow light"><i/> TRACE WORKSPACE</div><h1>Evidence.<br/>Procedure.<br/><em>Review.</em></h1><p>Sign in to access records stored for your account and authorized engagements.</p></div></aside><main className="auth-main"><div className="auth-top"><Link to="/">‹ Back to TRACE</Link><span>{mode === 'signin' ? 'New account?' : 'Already registered?'} <button onClick={() => go(mode === 'signin' ? '/signup' : '/signin')}>{mode === 'signin' ? 'Create account' : 'Sign in'}</button></span></div><section className="auth-card"><div className="eyebrow"><i/> {mode === 'signin' ? 'ACCOUNT SIGN IN' : 'ACCOUNT REGISTRATION'}</div><h2>{mode === 'signin' ? 'Sign in to TRACE' : 'Create your account'}</h2><form className="auth-form" onSubmit={submit}>
+  return <div className={`auth auth-${mode}`}><aside className="auth-side"><Link className="brand inverse" to="/">TRACE<span className="period">.</span></Link><div className="auth-story"><div className="eyebrow light"><i/> TRACE WORKSPACE</div><h1>Evidence.<br/>Procedure.<br/><em>Review.</em></h1><p>Sign in to access records stored for your account and authorized engagements.</p></div></aside><main className="auth-main"><div className="auth-top"><Link to="/">‹ Back to TRACE</Link><span>{mode === 'signin' ? '' : 'Already registered?'} <button onClick={() => go(mode === 'signin' ? '/signup' : '/signin')}>{mode === 'signin' ? '' : 'Sign in'}</button></span></div><section className="auth-card"><div className="eyebrow"><i/> {mode === 'signin' ? 'ACCOUNT SIGN IN' : 'ACCOUNT REGISTRATION'}</div><h2>{mode === 'signin' ? 'Sign in to TRACE' : 'Create your account'}</h2><form className="auth-form" onSubmit={submit}>
       {mode === 'signin' && <label>Account role<select value={role} onChange={e => setRole(e.target.value)}><option value="client">Client</option><option value="auditor">Independent auditor</option><option value="admin">Platform administrator</option></select></label>}
       {mode === 'signup' && <><label>Account role<select value={role} onChange={e => setRole(e.target.value)}><option value="client">Client</option><option value="auditor">Independent auditor</option></select></label><label>Full name<input required minLength="2" value={form.name} onChange={update('name')}/></label><label>Organization<input required value={form.organization} onChange={update('organization')}/></label><label>Date of birth<input required type="date" value={form.date_of_birth} onChange={update('date_of_birth')}/></label></>}
       <label>Work email<input required type="email" autoComplete="username" value={form.email} onChange={update('email')}/></label><label>Password<input required minLength={mode === 'signup' ? 10 : undefined} type="password" autoComplete={mode === 'signin' ? 'current-password' : 'new-password'} value={form.password} onChange={update('password')}/></label>
-      <ErrorBox error={error}/><Btn disabled={busy}>{busy ? 'Working…' : mode === 'signin' ? 'Sign in' : 'Create account'} <ArrowRight size={15}/></Btn>
+      <ErrorBox error={error}/><Btn disabled={busy}>{busy ? 'Working…' : mode === 'signin' ? 'Sign in' : ''} <ArrowRight size={15}/></Btn>
     </form><p className="auth-note"><LockKeyhole size={14}/> Roles and account details are verified by the API.</p></section></main></div>;
 }
 
@@ -75,7 +75,7 @@ function NewAudit({ onCreated }) {
   const [form, setForm] = useState({ name: '', organization: '', period: '', scope: '', required_records: '' }), [error, setError] = useState(''), [busy, setBusy] = useState(false);
   const set = key => e => setForm(old => ({ ...old, [key]: e.target.value }));
   async function create(e) { e.preventDefault(); setBusy(true); setError(''); try { const result = await api('/engagements/', { method: 'POST', body: jsonBody({ ...form, required_records: form.required_records.split('\n').map(x => x.trim()).filter(Boolean) }) }); onCreated(result); } catch (err) { setError(err.message); } finally { setBusy(false); } }
-  return <section className="panel pad"><form className="formgrid" onSubmit={create}><label>Organization<input required value={form.organization} onChange={set('organization')}/></label><label>Engagement name<input required value={form.name} onChange={set('name')}/></label><label>Period<input required value={form.period} onChange={set('period')}/></label><label>Scope<input required value={form.scope} onChange={set('scope')}/></label><label className="wide">Required records<textarea rows="4" value={form.required_records} onChange={set('required_records')} placeholder="One record type per line"/></label><ErrorBox error={error}/><Btn disabled={busy}>{busy ? 'Saving…' : 'Create engagement'}</Btn></form></section>;
+  return <section className="panel new-engagement-panel"><header className="new-engagement-heading"><span className="new-engagement-icon"><Plus size={17}/></span><div><small>NEW ENGAGEMENT</small><h2>Engagement details</h2><p>Set up the organization, audit period, and records to review.</p></div></header><form className="formgrid new-engagement-form" onSubmit={create}><label>Organization<input required value={form.organization} onChange={set('organization')}/></label><label>Engagement name<input required value={form.name} onChange={set('name')}/></label><label>Period<input required value={form.period} onChange={set('period')}/></label><label>Scope<input required value={form.scope} onChange={set('scope')}/></label><label className="wide">Required records<textarea rows="3" value={form.required_records} onChange={set('required_records')} placeholder="One record type per line"/></label><div className="new-engagement-actions"><ErrorBox error={error}/><Btn className="create-engagement-btn" disabled={busy}>{busy ? 'Saving…' : 'Create engagement'}</Btn></div></form></section>;
 }
 
 function Assignment({ engagement, onDone }) {
@@ -184,15 +184,8 @@ function Reports({ engagements, engagementId, setEngagementId }) {
       const csvResponse = await api(`/audit/${encodeURIComponent(engagementId)}/exports/csv`);
       const csv = await csvResponse.text();
       const zip = new JSZip();
-      const charts = Array.from(document.querySelectorAll('.report-chart-grid .revenue-chart')).map((section, index) => {
-        const svg = section.querySelector('svg')?.cloneNode(true);
-        if (!svg) return null;
-        svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-        const title = section.querySelector('h2')?.textContent || `Chart ${index + 1}`;
-        const filename = `chart-${String(index + 1).padStart(2, '0')}.svg`;
-        zip.file(`charts/${filename}`, new XMLSerializer().serializeToString(svg));
-        return { title, svg: svg.outerHTML };
-      }).filter(Boolean);
+      const charts = reportChartsFromPage();
+      charts.forEach((chart, index) => zip.file(`charts/chart-${String(index + 1).padStart(2, '0')}.svg`, chart.svg));
       const reportHtml = createDownloadableReport(report, charts);
       const safeId = String(engagementId).replace(/[^a-zA-Z0-9_-]/g, '_');
       zip.file(`${safeId}-report.html`, reportHtml);
@@ -205,8 +198,22 @@ function Reports({ engagements, engagementId, setEngagementId }) {
     } catch (e) { setError(e.message); }
     finally { setBusy(false); }
   }
+  async function printCompleteReport() {
+    // Open synchronously from the click so the browser does not block the print window after the API call.
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) { setError('Allow pop-ups for this site to print or save the report as a PDF.'); return; }
+    setBusy(true); setError('');
+    try {
+      const csvResponse = await api(`/audit/${encodeURIComponent(engagementId)}/exports/csv`);
+      const csv = await csvResponse.text();
+      const html = createDownloadableReport(report, reportChartsFromPage(), csv);
+      printWindow.document.open(); printWindow.document.write(html); printWindow.document.close();
+      window.setTimeout(() => { printWindow.focus(); printWindow.print(); }, 300);
+    } catch (e) { printWindow.close(); setError(e.message); }
+    finally { setBusy(false); }
+  }
   const analysis = report?.revenue_analysis;
-  return <div className="stack"><Header eyebrow="Reports" title="Reports & continuous scanning" desc="Generate a pandas report from the selected engagement’s uploaded datasets."/><div className="filters"><EngagementSelect engagements={engagements} value={engagementId} onChange={setEngagementId}/></div><ErrorBox error={error}/>{engagementId && <div className="actions"><Btn disabled={busy} onClick={generate}>{busy ? 'Analyzing uploaded data…' : 'Generate report'}</Btn><Btn kind="soft" disabled={busy} onClick={scan}>Scan latest dataset versions</Btn>{report && <Btn kind="soft" disabled={busy} onClick={downloadCompleteReport}><Download size={15}/> {busy ? 'Preparing download…' : 'Download complete report (.zip)'}</Btn>}</div>}{analysis && <>
+  return <div className="stack"><Header eyebrow="Reports" title="Reports & continuous scanning" desc="Generate a pandas report from the selected engagement’s uploaded datasets."/><div className="filters"><EngagementSelect engagements={engagements} value={engagementId} onChange={setEngagementId}/></div><ErrorBox error={error}/>{engagementId && <div className="actions"><Btn disabled={busy} onClick={generate}>{busy ? 'Analyzing uploaded data…' : 'Generate report'}</Btn><Btn kind="soft" disabled={busy} onClick={scan}>Scan latest dataset versions</Btn>{report && <><Btn kind="soft" disabled={busy} onClick={downloadCompleteReport}><Download size={15}/> {busy ? 'Preparing download…' : 'Download complete report (.zip)'}</Btn><Btn kind="soft" disabled={busy} onClick={printCompleteReport}>{busy ? 'Preparing…' : 'Print full report / Save PDF'}</Btn></>}</div>}{analysis && <>
     <section className="stats report-stats">{[['Invoices', analysis.summary.invoice_count], ['Flagged', analysis.summary.flagged_invoice_count], ['Gross amount', analysis.summary.currency_count > 1 ? 'Multiple currencies' : formatAmount(analysis.summary.gross_total)], ['Check findings', analysis.discrepancy_count], ['Data files', analysis.datasets.length]].map(([label, value]) => <article className="stat" key={label}><small>{label}</small><strong>{value}</strong><em>From uploaded records</em></article>)}</section>
     {analysis.summary.currency_count > 1 && <section className="panel pad"><h2>Totals by currency</h2><Table headers={['Currency', 'Gross invoice amount', 'Taxable value', 'Tax and TCS']} rows={Object.keys(analysis.summary.gross_totals_by_currency).map(currency => [currency, formatAmount(analysis.summary.gross_totals_by_currency[currency]), formatAmount(analysis.summary.taxable_totals_by_currency[currency]), formatAmount(analysis.summary.tax_totals_by_currency[currency])])}/></section>}
     <section className="panel"><div className="panel-head"><h2>Source Audit_Flag values</h2><Pill>{analysis.source_audit_flags.flagged_count} flagged</Pill></div><p className="flag-note">Flag status is taken only from the uploaded Audit_Flag column. No other fields or checks change this status.</p>{analysis.source_audit_flags.flagged_records.length ? <Table headers={['Invoice ID', 'Bill no.', 'Audit_Flag', 'Issue type', 'Issue detail']} rows={analysis.source_audit_flags.flagged_records.map(x => [x.invoice_id, x.bill_no, x.audit_flag, x.audit_issue_type, x.audit_issue_detail])}/> : <Empty>No invoice rows have Audit_Flag marked as Flag.</Empty>}<p className="flag-note">Not flag: {analysis.source_audit_flags.not_flagged_count} · Unclassified/blank: {analysis.source_audit_flags.unclassified_count}</p></section>
@@ -229,7 +236,43 @@ function reportColumnNames(dataset) {
   return '—';
 }
 
-function createDownloadableReport(report, charts) {
+function reportChartsFromPage() {
+  return Array.from(document.querySelectorAll('.report-chart-grid .revenue-chart')).map((section, index) => {
+    const svg = section.querySelector('svg')?.cloneNode(true);
+    if (!svg) return null;
+    svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    const title = section.querySelector('h2')?.textContent || `Chart ${index + 1}`;
+    return { title, svg: svg.outerHTML };
+  }).filter(Boolean);
+}
+
+function parseCsvRows(csvText) {
+  const text = String(csvText || '').replace(/^\uFEFF/, '');
+  const rows = [];
+  let row = [], cell = '', quoted = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (quoted) {
+      if (character === '"' && text[index + 1] === '"') { cell += '"'; index += 1; }
+      else if (character === '"') quoted = false;
+      else cell += character;
+    } else if (character === '"' && cell.length === 0) quoted = true;
+    else if (character === ',') { row.push(cell); cell = ''; }
+    else if (character === '\n' || character === '\r') {
+      row.push(cell); cell = '';
+      if (row.some(value => value.length > 0)) rows.push(row);
+      row = [];
+      if (character === '\r' && text[index + 1] === '\n') index += 1;
+    } else cell += character;
+  }
+  if (cell.length || row.length) {
+    row.push(cell);
+    if (row.some(value => value.length > 0)) rows.push(row);
+  }
+  return rows;
+}
+
+function createDownloadableReport(report, charts, csvText = null) {
   const analysis = report?.revenue_analysis;
   const summary = analysis?.summary;
   const summaryRows = summary ? [
@@ -244,8 +287,14 @@ function createDownloadableReport(report, charts) {
   const datasetMarkup = (analysis?.datasets || []).map(dataset => `<tr><td>${escapeReportHtml(dataset.filename)}</td><td>${escapeReportHtml(dataset.recognized_as)}</td><td>${escapeReportHtml(dataset.rows)}</td><td>${escapeReportHtml(reportColumnNames(dataset))}</td></tr>`).join('') || '<tr><td colspan="4">No supported tabular uploads were analyzed.</td></tr>';
   const findingMarkup = (report?.findings || []).map(finding => `<tr><td>${escapeReportHtml(finding.title)}</td><td>${escapeReportHtml(finding.severity)}</td><td>${escapeReportHtml(finding.status)}</td><td>${escapeReportHtml(finding.description)}</td></tr>`).join('') || '<tr><td colspan="4">No findings are included.</td></tr>';
   const procedureMarkup = (report?.procedure_runs || []).map(run => `<li>Run ${escapeReportHtml(run.id)} · ${escapeReportHtml(run.created_at || '')} · ${escapeReportHtml(run.procedure || run.check_name || 'Procedure')}</li>`).join('') || '<li>No procedure runs are included.</li>';
+  const csvRows = csvText === null ? [] : parseCsvRows(csvText);
+  const columnCount = csvRows.reduce((count, row) => Math.max(count, row.length), 0);
+  const csvHeaders = Array.from({ length: columnCount }, (_, index) => csvRows[0]?.[index] || `Column ${index + 1}`);
+  const csvHeaderMarkup = csvHeaders.map(header => `<th>${escapeReportHtml(header)}</th>`).join('');
+  const csvBodyMarkup = csvRows.slice(1).map(row => `<tr>${csvHeaders.map((_, index) => `<td>${escapeReportHtml(row[index] ?? '')}</td>`).join('')}</tr>`).join('');
+  const csvMarkup = csvText === null ? '' : `<section class="workpaper-data"><h2>Complete workpaper data</h2><p>${Math.max(0, csvRows.length - 1)} data row(s) from the permission-checked CSV export. Long tables continue across pages.</p>${columnCount ? `<table><thead><tr>${csvHeaderMarkup}</tr></thead><tbody>${csvBodyMarkup}</tbody></table>` : '<p>The CSV export contains no tabular data.</p>'}</section>`;
   const rawData = escapeReportHtml(JSON.stringify(report, null, 2));
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TRACE Complete Report</title><style>body{font:15px/1.55 Arial,sans-serif;color:#24352b;max-width:1050px;margin:36px auto;padding:0 24px}h1,h2{color:#173e31}header{border-bottom:2px solid #dce5dc;padding-bottom:18px;margin-bottom:28px}.meta{color:#627168}table{border-collapse:collapse;width:100%;margin:12px 0 30px}th,td{text-align:left;border:1px solid #dce5dc;padding:9px;vertical-align:top}th{background:#f2f5f0}section.chart{break-inside:avoid;border:1px solid #dce5dc;border-radius:8px;padding:16px;margin:18px 0}svg{max-width:100%;height:auto}.charts{display:grid;grid-template-columns:1fr 1fr;gap:14px}.charts section{border:1px solid #dce5dc;border-radius:8px;padding:14px;break-inside:avoid}.charts h2{font-size:18px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f6f3;padding:14px;font-size:12px}.notice{background:#f4f5ed;padding:12px;border-left:4px solid #527b58}@media print{body{margin:0;max-width:none}.charts{display:block}section{break-inside:avoid}a{color:inherit}}</style></head><body><header><h1>TRACE Audit Report</h1><div class="meta">Engagement: ${escapeReportHtml(report?.engagement?.name || report?.engagement_id || 'Selected engagement')} · Version: ${escapeReportHtml(report?.report_version ?? '—')} · Generated: ${escapeReportHtml(report?.generated_at || new Date().toISOString())}</div></header><p class="notice">This report summarizes uploaded data and deterministic checks. It requires human review and is not an audit opinion or assurance conclusion.</p><h2>Summary</h2><table><tbody>${summaryRows}</tbody></table><h2>Visualizations</h2><div class="charts">${chartMarkup}</div><h2>Discrepancy review</h2><table><thead><tr><th>Issue</th><th>Code</th><th>Rows</th><th>Absolute variance</th></tr></thead><tbody>${discrepancyMarkup}</tbody></table><h2>Analyzed uploads</h2><table><thead><tr><th>File</th><th>Dataset type</th><th>Rows</th><th>Columns</th></tr></thead><tbody>${datasetMarkup}</tbody></table><h2>Findings</h2><table><thead><tr><th>Finding</th><th>Severity</th><th>Status</th><th>Description</th></tr></thead><tbody>${findingMarkup}</tbody></table><h2>Procedure runs</h2><ul>${procedureMarkup}</ul><h2>Workpaper CSV</h2><p>The accompanying CSV contains the exported engagement workpaper data. Open the CSV file included beside this HTML report in the downloaded ZIP.</p><h2>Full report data</h2><details><summary>View JSON source</summary><pre>${rawData}</pre></details></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TRACE Complete Report</title><style>@page{size:A4 landscape;margin:12mm}*{box-sizing:border-box}html,body{background:#fff!important}body{font:12px/1.5 Arial,sans-serif;color:#24352b;max-width:1200px;margin:30px auto;padding:0 22px}h1,h2{color:#173e31}header{border-bottom:2px solid #dce5dc;padding-bottom:18px;margin-bottom:24px}.meta{color:#627168}table{border-collapse:collapse;width:100%;margin:12px 0 26px;table-layout:auto}th,td{text-align:left;border:1px solid #dce5dc;padding:6px;vertical-align:top;overflow-wrap:anywhere}th{background:#f2f5f0!important;print-color-adjust:exact;-webkit-print-color-adjust:exact}thead{display:table-header-group}tr{break-inside:avoid;page-break-inside:avoid}.charts{display:grid;grid-template-columns:1fr 1fr;gap:14px}.charts section{background:#fff;border:1px solid #dce5dc;border-radius:8px;padding:14px;break-inside:avoid;page-break-inside:avoid}.charts h2{font-size:17px}.charts svg{display:block;background:#fff;max-width:100%;height:auto}.workpaper-data{break-before:page;page-break-before:always}.workpaper-data table{font-size:7px;line-height:1.25}.workpaper-data th,.workpaper-data td{padding:3px}.workpaper-data td{white-space:pre-wrap}.notice{background:#f4f5ed;padding:12px;border-left:4px solid #527b58;print-color-adjust:exact;-webkit-print-color-adjust:exact}.summary-table{max-width:600px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f6f3;padding:14px;font-size:10px}@media screen{body{max-width:1200px;margin:30px auto}}@media print{body{max-width:none;margin:0;padding:0}.charts{grid-template-columns:1fr 1fr}a{color:inherit}}</style></head><body><header><h1>TRACE Audit Report</h1><div class="meta">Engagement: ${escapeReportHtml(report?.engagement?.name || report?.engagement_id || 'Selected engagement')} · Version: ${escapeReportHtml(report?.report_version ?? '—')} · Generated: ${escapeReportHtml(report?.generated_at || new Date().toISOString())}</div></header><p class="notice">This report summarizes uploaded data and deterministic checks. It requires human review and is not an audit opinion or assurance conclusion.</p><h2>Summary</h2><table class="summary-table"><tbody>${summaryRows}</tbody></table><h2>Visualizations</h2><div class="charts">${chartMarkup}</div><h2>Discrepancy review</h2><table><thead><tr><th>Issue</th><th>Code</th><th>Rows</th><th>Absolute variance</th></tr></thead><tbody>${discrepancyMarkup}</tbody></table><h2>Analyzed uploads</h2><table><thead><tr><th>File</th><th>Dataset type</th><th>Rows</th><th>Columns</th></tr></thead><tbody>${datasetMarkup}</tbody></table><h2>Findings</h2><table><thead><tr><th>Finding</th><th>Severity</th><th>Status</th><th>Description</th></tr></thead><tbody>${findingMarkup}</tbody></table><h2>Procedure runs</h2><ul>${procedureMarkup}</ul>${csvMarkup}<h2>Full report data</h2><details><summary>View JSON source</summary><pre>${rawData}</pre></details></body></html>`;
 }
 
 function formatAmount(value) { return value == null ? '—' : new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(Number(value)); }

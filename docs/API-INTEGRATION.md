@@ -32,4 +32,4 @@ The gross arithmetic check assumes `Gross_Invoice_Amount = Total_Taxable_Value -
 
 ## Complete report download
 
-The Reports screen's **Download complete report (.zip)** action packages the generated report JSON, the report HTML, the current D3 chart SVGs, and the engagement workpaper CSV. The HTML can be opened in a browser or printed to PDF. The CSV is fetched from the API's permission-checked export endpoint; auditors need the transaction export grant in addition to the report grant.
+The Reports screen's **Download complete report (.zip)** action packages the generated report JSON, the report HTML, the current D3 chart SVGs, and the engagement workpaper CSV. **Print full report / Save PDF** opens a white-background, landscape print layout with the charts and every row from the same permission-checked CSV export. Choose **Save as PDF** in the browser print dialog. Auditors need the transaction export grant in addition to the report grant for either full-data export.
