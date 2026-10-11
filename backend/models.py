@@ -17,8 +17,8 @@ class User(Base):
     __tablename__ = "users"
     id: Mapped[int] = mapped_column(primary_key=True)
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
-    google_subject: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(200))
+    password_hash: Mapped[str | None] = mapped_column(String(256), nullable=True)
     role: Mapped[str] = mapped_column(String(20), index=True)
     organization: Mapped[str] = mapped_column(String(200), default="")
     company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id"), nullable=True, index=True)
@@ -95,6 +95,14 @@ class SecurityEvent(Base):
     email: Mapped[str] = mapped_column(String(320), default="")
     event_type: Mapped[str] = mapped_column(String(80), index=True)
     source_ip: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+
+class LoginAttempt(Base):
+    __tablename__ = "login_attempts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email_key: Mapped[str] = mapped_column(String(320), index=True)
+    source_ip: Mapped[str] = mapped_column(String(64), index=True)
+    succeeded: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
 
 class ProcedureRun(Base):

@@ -2,27 +2,25 @@
 
 Run with: uvicorn backend.main:app --reload --port 8000
 """
-import base64, csv, hashlib, hmac, io, json, os, secrets, time
+import csv, hashlib, io, json, os, secrets
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Annotated, Any, Literal
-from urllib.parse import urlencode
+from typing import Annotated, Literal
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, status
-from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import Response
 from jose import JWTError, jwt
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
-from sqlalchemy import select
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from .database import Base, DATA_DIR, engine, get_db
-from .models import AccessGrant, AdminAuditEvent, Artifact, AuditEvent, AuditSnapshot, Company, Engagement, EvidenceRequest, Finding, ProcedureRun, ReportVersion, SamplingRun, SecurityEvent, User, now
+from .models import AccessGrant, AdminAuditEvent, Artifact, AuditEvent, AuditSnapshot, Company, Engagement, EvidenceRequest, Finding, LoginAttempt, ProcedureRun, ReportVersion, SamplingRun, SecurityEvent, User, now
 from .migrations import migrate
 from .services.data_pipeline import DatasetError, SUPPORTED_EXTENSIONS, dataframe_records, load_dataframe, profile_dataframe
 from .services.audit_engine import CHECKS, deterministic_sample, execute_check, risk_indicators, run_checks
@@ -33,10 +31,6 @@ migrate()
 SECRET_KEY = os.getenv("TRACE_SECRET_KEY", "local-development-secret-change-before-deployment")
 ALGORITHM = "HS256"
 TOKEN_MINUTES = int(os.getenv("TRACE_TOKEN_MINUTES", "1440"))
-GOOGLE_CLIENT_ID = os.getenv("TRACE_GOOGLE_CLIENT_ID", "").strip()
-GOOGLE_CLIENT_SECRET = os.getenv("TRACE_GOOGLE_CLIENT_SECRET", "").strip()
-GOOGLE_REDIRECT_URI = os.getenv("TRACE_GOOGLE_REDIRECT_URI", "http://127.0.0.1:8000/api/v1/auth/google/callback").strip()
-PLATFORM_ADMIN_EMAIL = "drb.genai@gmail.com"
 UPLOAD_DIR = DATA_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 MAX_UPLOAD_BYTES = int(os.getenv("TRACE_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
@@ -44,6 +38,41 @@ MAX_UPLOAD_BYTES = int(os.getenv("TRACE_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)
 app = FastAPI(title="TRACE — AI-Run Statutory Revenue Audit", version="0.2.0", description="Evidence-led, reproducible audit workflow API")
 origins = [x.strip() for x in os.getenv("TRACE_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"], allow_headers=["Authorization", "Content-Type"])
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    derived = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 310_000)
+    return f"pbkdf2_sha256$310000${salt.hex()}${derived.hex()}"
+
+def verify_password(password: str, encoded: str) -> bool:
+    try:
+        algorithm, iterations, salt, expected = encoded.split("$")
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), int(iterations)).hex()
+        return algorithm == "pbkdf2_sha256" and secrets.compare_digest(actual, expected)
+    except (ValueError, TypeError):
+        return False
+
+def bootstrap_admin():
+    email = os.getenv("TRACE_BOOTSTRAP_ADMIN_EMAIL", "").strip().lower()
+    password = os.getenv("TRACE_BOOTSTRAP_ADMIN_PASSWORD", "")
+    if not email or not password: return
+    from .database import SessionLocal
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.email == email))
+        if user is None:
+            user = User(email=email, name=os.getenv("TRACE_BOOTSTRAP_ADMIN_NAME", "TRACE Administrator"), password_hash=hash_password(password), role="admin", organization="TRACE")
+            db.add(user)
+        else:
+            user.name = os.getenv("TRACE_BOOTSTRAP_ADMIN_NAME", "TRACE Administrator")
+            if not user.password_hash:
+                user.password_hash = hash_password(password)
+                user.token_version += 1
+            user.role = "admin"
+            user.organization = "TRACE"
+            user.active = True
+        db.commit()
+
+bootstrap_admin()
 
 def user_out(user: User):
     return {"id": user.id, "email": user.email, "name": user.name, "role": user.role, "organization": user.organization, "company_id": user.company_id, "active": user.active, "created_at": user.created_at}
@@ -64,56 +93,31 @@ def get_or_create_company(db: Session, name: str) -> Company:
     db.flush()
     return company
 
+def create_private_tenant(db: Session, name: str, email: str) -> Company:
+    """Public registration creates an isolated tenant; a matching name is not proof of membership."""
+    label = " ".join(name.split()).strip()
+    if not label: raise HTTPException(422, "Company name is required")
+    suffix = hashlib.sha256(email.casefold().encode()).hexdigest()[:16]
+    company = Company(legal_name=label, normalized_name=f"{normalized_name(label)[:220]}#{suffix}")
+    db.add(company); db.flush()
+    return company
+
 def issue_token(user: User):
     exp = datetime.now(timezone.utc) + timedelta(minutes=TOKEN_MINUTES)
     return {"access_token": jwt.encode({"sub": str(user.id), "role": user.role, "ver": user.token_version, "exp": exp}, SECRET_KEY, algorithm=ALGORITHM), "token_type": "bearer", "expires_in": TOKEN_MINUTES * 60, "user": user_out(user)}
 
-class UserInviteIn(BaseModel):
+class RegisterIn(BaseModel):
+    name: str = Field(min_length=2, max_length=200)
     email: EmailStr
+    password: str = Field(min_length=10, max_length=128)
     role: Literal["client", "auditor"] = "client"
     organization: str = Field(default="", max_length=200)
+    date_of_birth: date | None = None
 
-    @field_validator("email")
-    @classmethod
-    def gmail_only(cls, value):
-        if not str(value).lower().endswith("@gmail.com"):
-            raise ValueError("Only Gmail addresses can be enabled for TRACE")
-        return value
+class LoginIn(BaseModel):
+    email: EmailStr
+    password: str
 
-
-def _google_state_pack(state: str, nonce: str, frontend_origin: str) -> str:
-    payload = json.dumps({"state": state, "nonce": nonce, "frontend_origin": frontend_origin, "issued_at": int(time.time())}, separators=(",", ":")).encode()
-    encoded = base64.urlsafe_b64encode(payload).decode().rstrip("=")
-    signature = hmac.new(SECRET_KEY.encode(), encoded.encode(), hashlib.sha256).hexdigest()
-    return f"{encoded}.{signature}"
-
-
-def _google_state_unpack(value: str, expected_state: str) -> dict[str, Any] | None:
-    try:
-        encoded, signature = value.split(".", 1)
-        expected_signature = hmac.new(SECRET_KEY.encode(), encoded.encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(signature, expected_signature):
-            return None
-        payload = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
-        if payload.get("state") != expected_state or time.time() - payload.get("issued_at", 0) > 600:
-            return None
-        return payload
-    except (ValueError, TypeError, json.JSONDecodeError):
-        return None
-
-
-def _google_popup_response(frontend_origin: str, *, result: dict[str, Any] | None = None, error: str | None = None, status_code: int = 200) -> HTMLResponse:
-    message = {"type": "trace-google-auth", "result": result, "error": error}
-    serialized = json.dumps(message, separators=(",", ":")).replace("<", "\\u003c")
-    html = f"""<!doctype html><meta charset="utf-8"><title>TRACE Google sign-in</title>
-<p id="status">Returning to TRACE…</p><script>
-const message = {serialized};
-if (window.opener) {{ window.opener.postMessage(message, {json.dumps(frontend_origin)}); window.close(); }}
-else {{ document.getElementById('status').textContent = message.error || 'Sign-in complete. You may close this window.'; }}
-</script>"""
-    response = HTMLResponse(html, status_code=status_code, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"})
-    response.delete_cookie("trace_google_oauth_state", path="/api/v1/auth/google")
-    return response
 
 class CompanyIn(BaseModel):
     legal_name: str = Field(min_length=2, max_length=240)
@@ -151,6 +155,10 @@ class ReviewIn(BaseModel):
     decision: Literal["accepted", "rejected", "needs_more_evidence"]
     note: str = ""
 
+class PasswordChangeIn(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=10, max_length=128)
+
 class AccountActiveIn(BaseModel):
     active: bool
 
@@ -163,11 +171,11 @@ class EvidenceRequestUpdate(BaseModel):
     note: str = Field(default="", max_length=4000)
     artifact_id: str | None = Field(default=None, max_length=40)
 
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-bearer = HTTPBearer()
-def authenticated_user(credentials: HTTPAuthorizationCredentials = Depends(bearer), db: Session = Depends(get_db)) -> User:
+from fastapi.security import OAuth2PasswordBearer
+oauth2 = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+def authenticated_user(token: str = Depends(oauth2), db: Session = Depends(get_db)) -> User:
     try:
-        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id = int(payload.get("sub", ""))
     except (JWTError, ValueError):
         raise HTTPException(status_code=401, detail="Invalid or expired access token", headers={"WWW-Authenticate": "Bearer"})
@@ -236,111 +244,67 @@ def root(): return {"service": "TRACE API", "docs": "/docs", "health": "/health"
 @app.get("/health", tags=["health"])
 def health(): return {"status": "ok", "database": "configured", "version": app.version}
 
-@app.get("/api/v1/auth/google/start", tags=["auth"])
-def google_login_start(request: Request, frontend_origin: str = Query(..., min_length=8, max_length=300)):
-    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
-        raise HTTPException(503, "Google sign-in is not configured on the backend")
-    if frontend_origin not in origins:
-        raise HTTPException(400, "Frontend origin is not allowed")
-    state, nonce = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
-    params = {
-        "client_id": GOOGLE_CLIENT_ID,
-        "redirect_uri": GOOGLE_REDIRECT_URI,
-        "response_type": "code",
-        "scope": "openid email profile",
-        "state": state,
-        "nonce": nonce,
-        "prompt": "select_account",
-    }
-    response = RedirectResponse(f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}", status_code=302)
-    response.set_cookie("trace_google_oauth_state", _google_state_pack(state, nonce, frontend_origin), max_age=600, httponly=True, secure=request.url.scheme == "https", samesite="lax", path="/api/v1/auth/google")
-    return response
+@app.post("/api/v1/auth/register", status_code=201, tags=["auth"])
+def register(body: RegisterIn, db: DbDep):
+    email = body.email.lower()
+    if not body.date_of_birth: raise HTTPException(422, "Date of birth is required")
+    today = date.today()
+    age = today.year - body.date_of_birth.year - ((today.month, today.day) < (body.date_of_birth.month, body.date_of_birth.day))
+    if age < 18: raise HTTPException(422, "You must be at least 18 to create an account")
+    if db.scalar(select(User.id).where(User.email == email)): raise HTTPException(409, "Email already registered")
+    company = create_private_tenant(db, body.organization, email) if body.role == "client" else None
+    user = User(email=email, name=body.name.strip(), password_hash=hash_password(body.password), role=body.role, organization=body.organization.strip(), company_id=company.id if company else None, date_of_birth=body.date_of_birth)
+    db.add(user); db.commit(); db.refresh(user)
+    return issue_token(user)
 
-
-@app.get("/api/v1/auth/google/callback", tags=["auth"], response_class=HTMLResponse)
-async def google_login_callback(request: Request, db: DbDep, state: str = "", code: str | None = None, error: str | None = None):
-    packed_state = request.cookies.get("trace_google_oauth_state", "")
-    oauth_state = _google_state_unpack(packed_state, state)
-    if not oauth_state or oauth_state.get("frontend_origin") not in origins:
-        raise HTTPException(400, "Google sign-in state is invalid or expired. Start sign-in again.")
-    frontend_origin = oauth_state["frontend_origin"]
-    if error:
-        return _google_popup_response(frontend_origin, error="Google sign-in was cancelled or denied.")
-    if not code:
-        return _google_popup_response(frontend_origin, error="Google did not return an authorization code.")
-    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
-        return _google_popup_response(frontend_origin, error="Google sign-in is not configured on the backend.", status_code=503)
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            token_response = await client.post("https://oauth2.googleapis.com/token", data={"code": code, "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET, "redirect_uri": GOOGLE_REDIRECT_URI, "grant_type": "authorization_code"})
-        token_response.raise_for_status()
-        google_tokens = token_response.json()
-        raw_id_token = google_tokens.get("id_token")
-        if not raw_id_token:
-            raise ValueError("Google did not return an identity token")
-        from google.auth.transport.requests import Request as GoogleRequest
-        from google.oauth2 import id_token as google_id_token
-        claims = await run_in_threadpool(google_id_token.verify_oauth2_token, raw_id_token, GoogleRequest(), GOOGLE_CLIENT_ID)
-    except Exception:
-        return _google_popup_response(frontend_origin, error="Google could not verify this sign-in. Try again.")
-    if not hmac.compare_digest(str(claims.get("nonce", "")), str(oauth_state["nonce"])):
-        return _google_popup_response(frontend_origin, error="Google sign-in verification failed. Start sign-in again.")
-    email = str(claims.get("email", "")).strip().lower()
-    if claims.get("email_verified") not in (True, "true") or not email or not claims.get("sub"):
-        return _google_popup_response(frontend_origin, error="Google must provide a verified email address.")
-    if not email.endswith("@gmail.com"):
-        return _google_popup_response(frontend_origin, error="TRACE sign-in currently supports Gmail addresses only.")
-    user = db.scalar(select(User).where(User.google_subject == str(claims["sub"])))
-    if user is None:
-        user = db.scalar(select(User).where(User.email == email))
-        if user is None:
-            if email != PLATFORM_ADMIN_EMAIL:
-                return _google_popup_response(frontend_origin, error="This Gmail is not enabled for TRACE. Ask the platform administrator to add it first.")
-            user = User(email=email, name=str(claims.get("name") or "TRACE Administrator")[:200], role="admin", organization="TRACE")
-            db.add(user)
-            db.flush()
-        if user.google_subject and user.google_subject != str(claims["sub"]):
-            return _google_popup_response(frontend_origin, error="This TRACE account is already linked to another Google account.")
-        user.google_subject = str(claims["sub"])
-    if email != user.email.casefold():
-        return _google_popup_response(frontend_origin, error="The Google account email does not match this TRACE account.")
-    if email == PLATFORM_ADMIN_EMAIL:
-        user.role = "admin"
-        user.organization = "TRACE"
-        user.active = True
-    elif user.role == "admin":
-        return _google_popup_response(frontend_origin, error="Administrator access is restricted to the designated Google account.")
-    user.name = str(claims.get("name") or user.name)[:200]
-    if not user.active:
-        return _google_popup_response(frontend_origin, error="This TRACE account is disabled.")
+@app.post("/api/v1/auth/login", tags=["auth"])
+def login(body: LoginIn, request: Request, db: DbDep):
+    email = body.email.lower().strip()
+    user = db.scalar(select(User).where(User.email == email))
     source_ip = request.client.host if request.client else ""
+    window_start = now() - timedelta(minutes=15)
+    failures = db.scalar(select(func.count(LoginAttempt.id)).where(LoginAttempt.email_key == email, LoginAttempt.created_at >= window_start, LoginAttempt.succeeded.is_(False))) or 0
+    if failures >= 5:
+        db.add(SecurityEvent(actor_id=user.id if user else None, email=email, event_type="auth.rate_limited", source_ip=source_ip)); db.commit()
+        raise HTTPException(429, "Too many failed sign-in attempts. Try again in 15 minutes.")
+    valid = bool(user and verify_password(body.password, user.password_hash) and user.active)
+    db.add(LoginAttempt(email_key=email, source_ip=source_ip, succeeded=valid))
+    if not valid:
+        db.add(SecurityEvent(actor_id=user.id if user else None, email=email, event_type="auth.login_failed", source_ip=source_ip)); db.commit()
+        raise HTTPException(401, "Incorrect email or password")
     user.last_login_at = now()
-    db.add(SecurityEvent(actor_id=user.id, email=user.email, event_type="auth.google_login_succeeded", source_ip=source_ip))
-    db.commit()
-    return _google_popup_response(frontend_origin, result=issue_token(user))
+    db.add(SecurityEvent(actor_id=user.id, email=email, event_type="auth.login_succeeded", source_ip=source_ip)); db.commit()
+    return issue_token(user)
+
 
 @app.get("/api/v1/auth/me", tags=["auth"])
 def me(user: UserDep): return user_out(user)
 
+@app.post("/api/v1/auth/password", tags=["auth"])
+def change_password(body: PasswordChangeIn, user: UserDep, db: DbDep):
+    if not verify_password(body.current_password, user.password_hash): raise HTTPException(400, "Current password is incorrect")
+    user.password_hash = hash_password(body.new_password); user.token_version += 1
+    db.add(SecurityEvent(actor_id=user.id, email=user.email, event_type="auth.password_changed")); db.commit()
+    return {"status": "password_changed", "tokens_revoked": True}
+
 @app.post("/api/v1/admin/users", status_code=201, tags=["admin"])
-def create_user(body: UserInviteIn, admin: UserDep, db: DbDep):
+def create_user(body: RegisterIn, admin: UserDep, db: DbDep):
     require_role(admin, "admin")
-    email = body.email.lower().strip()
-    if not email.endswith("@gmail.com"):
-        raise HTTPException(422, "Only Gmail addresses can be enabled for TRACE")
-    if email == PLATFORM_ADMIN_EMAIL:
-        raise HTTPException(409, "The platform administrator account is provisioned through Google sign-in.")
+    email = body.email.lower()
     company = get_or_create_company(db, body.organization) if body.role == "client" else None
     user = db.scalar(select(User).where(User.email == email))
+    if user and user.role == "admin": raise HTTPException(409, "Administrator credentials are managed through the bootstrap settings")
     if user:
+        user.name = body.name.strip()
+        user.password_hash = hash_password(body.password)
         user.role = body.role
         user.organization = body.organization.strip()
         user.company_id = company.id if company else None
         user.active = True
         user.token_version += 1
-        action = "user.enabled"
+        action = "user.credentials_reset"
     else:
-        user = User(email=email, name=email.split("@", 1)[0], role=body.role, organization=body.organization.strip(), company_id=company.id if company else None)
+        user = User(email=email, name=body.name.strip(), password_hash=hash_password(body.password), role=body.role, organization=body.organization.strip(), company_id=company.id if company else None)
         db.add(user)
         db.flush()
         action = "user.created"

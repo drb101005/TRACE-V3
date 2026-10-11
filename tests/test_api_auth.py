@@ -1,15 +1,18 @@
-def test_google_only_sessions_and_engagement_permissions(client, user_factory):
-    owner = user_factory("owner@gmail.com", "client", "Test Company")
-    headers = {"Authorization": f"Bearer {owner['token']}"}
+from datetime import date, timedelta
+
+def test_registration_login_and_revocation(client, registered_client):
+    headers = {"Authorization": f"Bearer {registered_client}"}
     assert client.get("/api/v1/auth/me", headers=headers).status_code == 200
     engagement = client.post("/api/v1/engagements/", headers=headers, json={"name":"FY26 Revenue Review", "organization":"Ignored by server", "period":"FY2026", "scope":"Revenue", "required_records":[]})
     assert engagement.status_code == 201
-    other = user_factory("other@gmail.com", "client", "Other Company")
-    other_headers = {"Authorization": f"Bearer {other['token']}"}
+    other = client.post("/api/v1/auth/register", json={"name":"Other Client", "email":"other-client@example.com", "password":"AnotherSafePass123", "role":"client", "organization":"Test Company", "date_of_birth":"1985-01-01"})
+    assert other.status_code == 201
+    other_headers = {"Authorization": f"Bearer {other.json()['access_token']}"}
     assert client.get(f"/api/v1/engagements/{engagement.json()['id']}", headers=other_headers).status_code == 404
-    auditor = user_factory("auditor@gmail.com", "auditor", "Audit Firm")
-    audit_headers = {"Authorization": f"Bearer {auditor['token']}"}
-    assignment = client.post(f"/api/v1/engagements/{engagement.json()['id']}/assign", headers=headers, json={"auditor_id":auditor["id"], "allowed_fields":["documents", "checks", "report", "sampling", "findings", "events", "transactions"]})
+    auditor = client.post("/api/v1/auth/register", json={"name":"Test Auditor", "email":"auditor@example.com", "password":"AuditorSafePass123", "role":"auditor", "organization":"Audit Firm", "date_of_birth":"1980-01-01"})
+    assert auditor.status_code == 201
+    audit_headers = {"Authorization": f"Bearer {auditor.json()['access_token']}"}
+    assignment = client.post(f"/api/v1/engagements/{engagement.json()['id']}/assign", headers=headers, json={"auditor_id":auditor.json()["user"]["id"], "allowed_fields":["documents", "checks", "report", "sampling", "findings", "events", "transactions"]})
     assert assignment.status_code == 200
     upload = client.post(f"/api/v1/uploads/{engagement.json()['id']}/upload", headers=headers, files={"file":("sales.csv", b"Invoice No,Amount\n0001,100\n0002,-5\n", "text/csv")})
     assert upload.status_code == 201
@@ -38,12 +41,14 @@ def test_google_only_sessions_and_engagement_permissions(client, user_factory):
     assert scan.json()["resolved_exception_count"] == 1 and scan.json()["report_version"] == 2
     assert client.put(f"/api/v1/engagements/{engagement.json()['id']}/access", headers=headers, json={"allowed_fields":["documents", "report", "sampling", "findings", "events", "transactions"]}).status_code == 200
     assert client.post(f"/api/v1/audit/{engagement.json()['id']}/checks", headers=audit_headers, json={"procedure":"financial check", "version":"1.0"}).status_code == 403
-    assert client.get("/api/v1/auth/me", headers=headers).status_code == 200
+    assert client.post("/api/v1/auth/login", json={"email": "test-client@example.com", "password": "wrong-password"}).status_code == 401
+    changed = client.post("/api/v1/auth/password", headers=headers, json={"current_password": "VerySafeTestPass123", "new_password": "NewSafePassphrase456"})
+    assert changed.status_code == 200
+    assert client.get("/api/v1/auth/me", headers=headers).status_code == 401
 
-def test_password_and_self_registration_routes_are_removed(client):
-    assert client.post("/api/v1/auth/register", json={}).status_code == 404
-    assert client.post("/api/v1/auth/login", json={}).status_code == 404
-    assert client.post("/api/v1/auth/password", json={}).status_code == 404
+def test_public_registration_cannot_set_admin(client):
+    response = client.post("/api/v1/auth/register", json={"name":"Bad Role", "email":"admin-role@example.test", "password":"VerySafeTestPass123", "role":"admin", "organization":"X", "date_of_birth":"1985-01-01"})
+    assert response.status_code == 422
 
 def test_rejects_expired_or_invalid_token(client):
     assert client.get("/api/v1/auth/me", headers={"Authorization":"Bearer garbage"}).status_code == 401
